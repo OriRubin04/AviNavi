@@ -1,0 +1,202 @@
+# AviNavi - GPS-denied visual localization for ArduPilot.
+#
+# Every value below is a default; nothing in the code hard-codes these.
+# Override a single key without editing the file:
+#     avinavi run --set mavlink.device=/dev/ttyACM0 --set rates.mavlink_odometry_hz=10
+#
+# Operating mode: offline | bench | flight   (see docs/safety-and-testing.md)
+mode: offline
+
+# ---------------------------------------------------------------------------
+# MAVLink transport
+# ---------------------------------------------------------------------------
+mavlink:
+  connection_type: serial        # serial | udp | tcp
+  device: /dev/ttyAMA0           # udp example: "udpout:127.0.0.1:14550"
+  baudrate: 921600
+  system_id: 1                   # must match the autopilot's SYSID_THISMAV
+  component_id: 197              # MAV_COMP_ID_VISUAL_INERTIAL_ODOMETRY
+  target_system: 1
+  target_component: 1
+  heartbeat_timeout_s: 3.0
+  send_heartbeat: true
+  heartbeat_hz: 1.0
+  request_attitude_hz: 10.0
+  # Ground-truth comparison only. MUST stay false for real GPS-denied
+  # operation; the localization loop never reads GPS.
+  request_gps_for_ground_truth: false
+
+# ---------------------------------------------------------------------------
+# Operator-selected initial position (see docs/initial-position.md)
+# ---------------------------------------------------------------------------
+initial_position:
+  # mavlink_origin: listen for GPS_GLOBAL_ORIGIN, which the autopilot emits
+  #                 after Mission Planner's "Set EKF origin here" map action.
+  # manual:         use the manual_* values below.
+  # auto:           mavlink_origin, falling back to manual on timeout.
+  source: mavlink_origin
+  wait_timeout_s: 0.0            # 0 = wait indefinitely
+  request_origin_on_start: true
+  manual_lat_deg: null
+  manual_lon_deg: null
+  manual_alt_m: null
+  push_origin_to_autopilot: false
+
+# ---------------------------------------------------------------------------
+# Camera
+# ---------------------------------------------------------------------------
+camera:
+  source: opencv                 # picamera2 | opencv | directory
+  device: "0"                    # index/URL for opencv, folder for directory
+  width: 1280
+  height: 720
+  fps: 30.0
+  save_frames_dir: null
+  # Pinhole intrinsics for the resolution above. Fill these in from your
+  # calibration; without them the scale comes only from the tile GSD.
+  fx: null
+  fy: null
+  cx: null
+  cy: null
+  distortion: []                 # [k1, k2, p1, p2, k3]
+  replay_speed: 1.0
+
+# ---------------------------------------------------------------------------
+# Camera -> body (FRD) extrinsics.
+# Identity = downward-facing camera whose image +X points along body +Y (right)
+# and image +Y points along body -X (aft). See docs/coordinate-frames.md.
+# ---------------------------------------------------------------------------
+camera_extrinsics:
+  rotation:
+    roll_deg: 0.0
+    pitch_deg: 0.0
+    yaw_deg: 0.0
+  translation:
+    x_m: 0.0
+    y_m: 0.0
+    z_m: 0.0
+
+# ---------------------------------------------------------------------------
+# Rates. Visual localization and MAVLink output are deliberately decoupled.
+# ---------------------------------------------------------------------------
+rates:
+  camera_fps: 30.0
+  visual_localization_hz: 5.0    # benchmark your Pi before raising this
+  mavlink_odometry_hz: 20.0
+  diagnostics_hz: 1.0
+
+# ---------------------------------------------------------------------------
+# SuperPoint (live frames only - tile features are precomputed offline)
+# ---------------------------------------------------------------------------
+superpoint:
+  max_num_keypoints: 1024
+  detection_threshold: 0.0005
+  nms_radius: 4
+  device: auto                   # auto | cpu | cuda
+  resize_max_side: 640
+  min_keypoints: 64
+
+# ---------------------------------------------------------------------------
+# LightGlue
+# ---------------------------------------------------------------------------
+lightglue:
+  features: superpoint
+  depth_confidence: 0.95         # early exit; -1 disables
+  width_confidence: 0.99         # point pruning; -1 disables
+  filter_threshold: 0.1
+  device: auto
+  max_candidate_tiles: 6
+
+# ---------------------------------------------------------------------------
+# Geometric verification (RANSAC / MAGSAC++)
+# ---------------------------------------------------------------------------
+geometry:
+  method: magsac                 # magsac | ransac | lmeds
+  model: homography              # homography (planar ground) | affine
+  reproj_threshold_px: 3.0
+  max_iterations: 5000
+  confidence: 0.999
+  min_matches: 20
+  min_inliers: 15
+  min_inlier_ratio: 0.25
+  max_reprojection_error_px: 4.0
+  min_scale_ratio: 0.25
+  max_scale_ratio: 4.0
+  min_spatial_spread: 0.15
+
+# ---------------------------------------------------------------------------
+# Confidence model. Weights should sum to 1.0.
+# ---------------------------------------------------------------------------
+confidence:
+  weight_inlier_ratio: 0.4
+  weight_inlier_count: 0.25
+  weight_reprojection: 0.2
+  weight_spread: 0.15
+  inlier_count_saturation: 120
+  reprojection_scale_px: 4.0
+  min_confidence: 0.5
+  position_sigma_best_m: 1.0
+  position_sigma_worst_m: 15.0
+  yaw_sigma_best_rad: 0.05
+  yaw_sigma_worst_rad: 0.5
+
+# ---------------------------------------------------------------------------
+# Tile search window. Recentred on every successful visual fix - never on GPS.
+# ---------------------------------------------------------------------------
+tile_search:
+  search_radius_m: 300.0
+  initial_search_radius_m: 500.0
+  radius_growth_factor: 1.5
+  max_search_radius_m: 2000.0
+  failures_before_growth: 2
+  prefer_last_matched_tile: true
+
+# ---------------------------------------------------------------------------
+# Map database
+# ---------------------------------------------------------------------------
+map:
+  database_path: map_database
+  terrain_alt_m: 0.0
+  feature_cache_size: 64
+
+# ---------------------------------------------------------------------------
+# Pose propagation between visual fixes (never repeats a stale pose forever)
+# ---------------------------------------------------------------------------
+propagation:
+  enabled: true
+  max_age_s: 1.0
+  use_velocity: true
+  max_velocity_dt_s: 2.0
+  max_speed_mps: 40.0
+  sigma_growth_mps: 2.0
+
+# ---------------------------------------------------------------------------
+# External navigation output
+# ---------------------------------------------------------------------------
+output:
+  message: odometry              # odometry | vision_position_estimate | none
+  # SAFETY: transmission is opt-in. Start every new airframe at false and only
+  # enable after the bench checks in docs/safety-and-testing.md pass.
+  send_to_autopilot: false
+  send_velocity: true
+  send_quality: true
+  timestamp_source: unix         # unix | boot
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+logging:
+  level: INFO
+  directory: logs
+  csv_enabled: true
+  log_transmitted_messages: true
+  console_diagnostics: true
+
+# ---------------------------------------------------------------------------
+# Safety gates between the visual solution and the flight controller
+# ---------------------------------------------------------------------------
+safety:
+  required_consecutive_good_fixes: 5
+  max_consecutive_failures: 10
+  max_position_jump_m: 100.0
+  require_heartbeat: true

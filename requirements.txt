@@ -1,0 +1,16 @@
+# Core runtime (works without a camera or GPU; enough for config, geo math,
+# MAVLink I/O and the offline replay harness).
+numpy>=1.23
+PyYAML>=6.0
+pymavlink>=2.4.37
+
+# Visual pipeline. On a Raspberry Pi 5 install the aarch64 CPU wheel of torch:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+opencv-python-headless>=4.8
+torch>=2.0
+# SuperPoint + LightGlue reference implementation (cvg/LightGlue ships both).
+lightglue @ git+https://github.com/cvg/LightGlue.git
+
+# Optional, only needed by `avinavi build-map` when slicing GeoTIFF sources.
+# rasterio>=1.3
+# pyproj>=3.5
