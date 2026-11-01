@@ -21,6 +21,144 @@ DEFAULT_CONFIG_PATH = os.path.join(
 
 
 @dataclass
+class QualityConfig:
+    """Gates that skip a cycle rather than risk a bad fix.
+
+    Both of these save work *and* improve safety, which is unusual. A frame
+    that is too blurred or taken at too steep a bank does not fail cleanly - it
+    produces a confidently wrong match, which is worse than no match at all.
+    """
+
+    #: Skip a frame markedly blurrier than its recent neighbours. The threshold
+    #: is relative because absolute sharpness depends on the terrain.
+    sharpness_gate_enabled: bool = True
+    #: Minimum sharpness as a fraction of the running median.
+    min_sharpness_ratio: float = 0.45
+    #: Skip matching beyond this bank angle. At 30 degrees the ground sample
+    #: distance varies 4x across the frame and the rectified far edge is mostly
+    #: extrapolation. 0 disables the gate.
+    max_bank_deg: float = 35.0
+
+
+@dataclass
+class PrewarpConfig:
+    """Rectify the live frame to a nadir, north-up, tile-scale view first.
+
+    The single largest lever on match rate.  See
+    :mod:`avinavi.localization.prewarp` for why, and
+    ``docs/matching-robustness.md`` for the measured effect.
+    """
+
+    enabled: bool = True
+    #: Longest side of the rectified image.  Caps the warp cost on a Pi.
+    max_output_side: int = 768
+    #: Refuse to rectify beyond this tilt; a near-horizon view rectifies to
+    #: mostly extrapolated nonsense.
+    max_tilt_deg: float = 55.0
+    #: Reject a rectification with less real (non-border) coverage than this.
+    min_valid_fraction: float = 0.25
+    footprint_margin: float = 1.05
+    #: Require fresh autopilot attitude before rectifying.  Without it the warp
+    #: assumes level flight, which on a banking fixed wing is worse than not
+    #: warping at all.
+    require_attitude: bool = True
+    max_attitude_age_s: float = 0.5
+    #: Fall back to matching the raw frame when rectification is unavailable
+    #: or fails.  Lower hit rate, but better than no attempt.
+    fallback_to_raw: bool = True
+
+
+@dataclass
+class PhotometricConfig:
+    """CLAHE normalisation to bridge the live-camera / basemap appearance gap.
+
+    Must be applied to **both** sides.  Build the tile database with
+    ``avinavi extract-features --normalize`` if this is enabled at runtime;
+    normalising only one side makes matching worse.
+    """
+
+    enabled: bool = True
+    clip_limit: float = 2.0
+    tile_grid: int = 8
+    denoise_sigma: float = 0.0
+
+
+@dataclass
+class FeaturesConfig:
+    """Which feature backend to run."""
+
+    #: "superpoint" (SuperPoint + LightGlue) or "opencv" (SIFT/AKAZE + ratio test)
+    backend: str = "superpoint"
+    #: OpenCV backend only: sift | akaze | orb
+    detector: str = "sift"
+    #: OpenCV backend only: Lowe's ratio threshold.
+    ratio: float = 0.8
+
+
+@dataclass
+class VisualOdometryConfig:
+    """Frame-to-frame optical flow, for dead reckoning between map fixes.
+
+    When map matching fails for a few seconds - cloud shadow, water, a gap in
+    the basemap - tracking the ground between consecutive *live* frames still
+    yields a displacement.  It drifts, and the drift is reported honestly as a
+    growing position sigma, but it keeps the solution alive across a dropout
+    instead of going silent at 22 m/s.
+    """
+
+    enabled: bool = True
+    #: Maximum points to track between frames.
+    max_points: int = 400
+    #: Re-detect when fewer than this many points survive.
+    min_points: int = 60
+    #: Give up dead reckoning after this long without a map fix.
+    max_dead_reckoning_s: float = 10.0
+    #: Assumed 1-sigma drift as a fraction of distance travelled.  Used to grow
+    #: the reported uncertainty; 0.05 means 5 m of error per 100 m flown.
+    drift_fraction: float = 0.05
+    #: Downscale frames before tracking; flow does not need full resolution.
+    resize_max_side: int = 480
+
+
+@dataclass
+class ReanchorConfig:
+    """Manual re-anchoring when the operator clicks the map.
+
+    See ``docs/manual-reanchor.md``.  Changes only where the Pi *searches* - it
+    is not a position fix and the next frame still has to earn its match.
+    """
+
+    enabled: bool = True
+    #: COMMAND_INT / MAV_CMD_SPATIAL_USER_1 addressed to this component. The
+    #: recommended channel: zero side effects, and we can ACK it so the operator
+    #: sees the click land. Needs the Mission Planner plugin in
+    #: tools/mission_planner_plugin/.
+    accept_spatial_user: bool = True
+    #: Overhear SET_GPS_GLOBAL_ORIGIN ("Set EKF Origin Here"). The only stock
+    #: Mission Planner map action that reaches a Pi on its own UART, because the
+    #: message has no target_component field and so gets forwarded. ArduPilot
+    #: rejects the origin change itself once the origin is set, so it is a
+    #: harmless no-op on the aircraft.
+    accept_set_origin: bool = True
+    #: Overhear DO_SET_ROI ("Point Camera Here"). Only reaches the Pi when the
+    #: Pi is the telemetry hub; a navigation no-op on a gimbal-less plane.
+    accept_roi: bool = True
+    #: Use HOME_POSITION ("Set Home Here"). Reaches every link reliably, but it
+    #: moves the RTL point and re-references relative altitudes, so: off.
+    accept_home_position: bool = False
+    #: Search radius for the first attempt after a manual re-anchor.
+    radius_m: float = 1500.0
+    #: Ignore a home broadcast that moved less than this - ArduPilot re-sends
+    #: home on arming and on origin changes, which is not operator intent.
+    min_move_m: float = 25.0
+    #: UDP control endpoint. Empty disables it. Anything that can reach this
+    #: port can redirect the navigation search, so keep it on localhost unless
+    #: you mean otherwise.
+    control_socket_host: str = ""
+    control_socket_port: int = 14555
+
+
+@dataclass
 class MavlinkConfig:
     """MAVLink transport and identity settings.
 
@@ -264,18 +402,40 @@ class PropagationConfig:
 class OutputConfig:
     """What we publish to ArduPilot, and whether we publish at all."""
 
-    #: "odometry" | "vision_position_estimate" | "none"
-    #: Exactly one authoritative external-navigation source; "none" is the
-    #: log-only mode mandated by the safety progression.
-    message: str = "odometry"
-    #: Master arm for transmission.  False = compute and log, transmit nothing.
+    #: "gps_input" | "odometry" | "vision_position_estimate" | "none"
+    #:
+    #: Exactly one authoritative external-navigation source.
+    #:
+    #: ``gps_input``  injects a synthetic GPS fix. **The only option that works
+    #:                on a 1 MB flight controller such as the MATEK F405-WING**,
+    #:                and then only with a custom firmware build that enables
+    #:                ``AP_GPS_MAV_ENABLED``. See
+    #:                ``docs/flight-controller-compatibility.md``.
+    #: ``odometry``   the richest interface, needs ``HAL_VISUALODOM_ENABLED``
+    #:                *and* ``EK3_FEATURE_EXTERNAL_NAV`` - 2 MB boards only.
+    #: ``none``       the log-only mode the safety progression starts from.
+    message: str = "gps_input"
+    #: Master arm for transmission. False = compute and log, transmit nothing.
     send_to_autopilot: bool = False
-    #: Populate ODOMETRY velocity fields (child frame BODY_FRD).
     send_velocity: bool = True
-    #: Populate the ODOMETRY quality field from the confidence score.
+    #: ODOMETRY only: populate the quality field from the confidence score.
     send_quality: bool = True
     #: Timestamp source: "unix" (UNIX epoch us) or "boot" (us since our start).
     timestamp_source: str = "unix"
+
+    # -- GPS_INPUT specifics ------------------------------------------------
+    #: Must equal the ArduPilot GPS *instance index*, which is 0 for
+    #: GPS1_TYPE=14. AP_GPS_MAV::handle_msg drops anything else without a word.
+    gps_input_id: int = 0
+    #: Reported satellite count. EK3_GPS_CHECK defaults to requiring 6, so a
+    #: lower number means the EKF never aligns.
+    gps_input_satellites: int = 12
+    gps_input_hdop: float = 0.9
+    gps_input_vdop: float = 1.3
+    #: Send the visually derived heading as the GPS yaw. Useful on an airframe
+    #: with a poor compass, but ArduPilot will use it for yaw alignment, so an
+    #: error here is not harmless. Off by default.
+    gps_input_send_yaw: bool = False
 
 
 @dataclass
@@ -313,13 +473,19 @@ class Config:
     camera: CameraConfig = field(default_factory=CameraConfig)
     camera_extrinsics: CameraExtrinsicsConfig = field(default_factory=CameraExtrinsicsConfig)
     rates: RatesConfig = field(default_factory=RatesConfig)
+    features: FeaturesConfig = field(default_factory=FeaturesConfig)
     superpoint: SuperPointConfig = field(default_factory=SuperPointConfig)
     lightglue: LightGlueConfig = field(default_factory=LightGlueConfig)
+    prewarp: PrewarpConfig = field(default_factory=PrewarpConfig)
+    photometric: PhotometricConfig = field(default_factory=PhotometricConfig)
+    quality: QualityConfig = field(default_factory=QualityConfig)
     geometry: GeometryConfig = field(default_factory=GeometryConfig)
     confidence: ConfidenceConfig = field(default_factory=ConfidenceConfig)
     tile_search: TileSearchConfig = field(default_factory=TileSearchConfig)
     map: MapConfig = field(default_factory=MapConfig)
     propagation: PropagationConfig = field(default_factory=PropagationConfig)
+    visual_odometry: VisualOdometryConfig = field(default_factory=VisualOdometryConfig)
+    reanchor: ReanchorConfig = field(default_factory=ReanchorConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     safety: SafetyConfig = field(default_factory=SafetyConfig)
@@ -420,13 +586,19 @@ _DATACLASS_BY_NAME = {
     "ExtrinsicsRotation": ExtrinsicsRotation,
     "ExtrinsicsTranslation": ExtrinsicsTranslation,
     "RatesConfig": RatesConfig,
+    "FeaturesConfig": FeaturesConfig,
     "SuperPointConfig": SuperPointConfig,
     "LightGlueConfig": LightGlueConfig,
+    "PrewarpConfig": PrewarpConfig,
+    "PhotometricConfig": PhotometricConfig,
+    "QualityConfig": QualityConfig,
     "GeometryConfig": GeometryConfig,
     "ConfidenceConfig": ConfidenceConfig,
     "TileSearchConfig": TileSearchConfig,
     "MapConfig": MapConfig,
     "PropagationConfig": PropagationConfig,
+    "VisualOdometryConfig": VisualOdometryConfig,
+    "ReanchorConfig": ReanchorConfig,
     "OutputConfig": OutputConfig,
     "LoggingConfig": LoggingConfig,
     "SafetyConfig": SafetyConfig,
@@ -490,9 +662,24 @@ def validate_config(config: Config) -> None:
         raise ConfigError("mode must be one of offline, bench, flight")
     if config.mavlink.connection_type not in ("serial", "udp", "tcp"):
         raise ConfigError("mavlink.connection_type must be serial, udp or tcp")
-    if config.output.message not in ("odometry", "vision_position_estimate", "none"):
+    if config.output.message not in (
+        "gps_input",
+        "odometry",
+        "vision_position_estimate",
+        "none",
+    ):
         raise ConfigError(
-            "output.message must be odometry, vision_position_estimate or none"
+            "output.message must be gps_input, odometry, vision_position_estimate "
+            "or none"
+        )
+    if config.features.backend not in ("superpoint", "opencv"):
+        raise ConfigError("features.backend must be superpoint or opencv")
+    if config.features.detector not in ("sift", "akaze", "orb"):
+        raise ConfigError("features.detector must be sift, akaze or orb")
+    if config.output.message == "gps_input" and config.output.gps_input_satellites < 6:
+        raise ConfigError(
+            "output.gps_input_satellites must be at least 6: EK3_GPS_CHECK "
+            "requires 6 satellites by default and the EKF will refuse to align"
         )
     if config.output.timestamp_source not in ("unix", "boot"):
         raise ConfigError("output.timestamp_source must be unix or boot")

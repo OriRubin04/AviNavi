@@ -31,6 +31,14 @@ class InvalidReason(str, Enum):
     STALE = "stale"
     NOT_INITIALIZED = "not_initialized"
     MAVLINK_DISCONNECTED = "mavlink_disconnected"
+    #: Bank angle beyond what rectification can usefully recover from.
+    EXCESSIVE_BANK = "excessive_bank"
+    #: Rectification was required but unavailable (no intrinsics or no height).
+    NOT_RECTIFIED = "not_rectified"
+    #: Frame markedly blurrier than its neighbours: skipped rather than risked.
+    FRAME_TOO_BLURRED = "frame_too_blurred"
+    #: Dead reckoning ran past its limit without a map fix.
+    DEAD_RECKONING_EXPIRED = "dead_reckoning_expired"
 
 
 @dataclass(frozen=True)

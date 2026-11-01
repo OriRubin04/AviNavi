@@ -29,6 +29,12 @@ from typing import Callable, Dict, List, Optional
 
 LOG = logging.getLogger(__name__)
 
+#: MAV_CMD_SET_MESSAGE_INTERVAL - the per-message replacement for the
+#: deprecated REQUEST_DATA_STREAM.
+MAV_CMD_SET_MESSAGE_INTERVAL = 511
+#: MAV_CMD_REQUEST_MESSAGE - one-off send of a given message ID.
+MAV_CMD_REQUEST_MESSAGE = 512
+
 
 class MavlinkConnectionError(RuntimeError):
     """The MAVLink link could not be established or has been lost."""
@@ -293,6 +299,47 @@ class MavlinkConnection:
                 float(params.get("param7", 0.0)),
             )
             self._sent_counts["COMMAND_LONG"] = self._sent_counts.get("COMMAND_LONG", 0) + 1
+
+    def send_command_ack(
+        self,
+        command: int,
+        result: int,
+        target_system: int = 0,
+        target_component: int = 0,
+    ) -> None:
+        """Acknowledge a command addressed to us.
+
+        Without this a GCS cannot tell whether the companion received anything -
+        and for the manual re-anchor that confirmation is the whole point, since
+        the operator otherwise has no way to know their click landed.
+        """
+        with self._lock:
+            if self._master is None:
+                raise MavlinkConnectionError("MAVLink connection is not open")
+            self._master.mav.command_ack_send(
+                int(command),
+                int(result),
+                0,
+                0,
+                int(target_system),
+                int(target_component),
+            )
+            self._sent_counts["COMMAND_ACK"] = self._sent_counts.get("COMMAND_ACK", 0) + 1
+
+    def request_message_interval(self, message_id: int, interval_us: float) -> None:
+        """Ask for a message to be re-sent periodically on this link.
+
+        Needed because ``HOME_POSITION`` and ``GPS_GLOBAL_ORIGIN`` are *not* in
+        any ArduPilot stream group: they are sent once, when they change, with
+        no retry.  On a lossy telemetry link a single dropped packet would mean
+        the companion never learns the origin.  A slow periodic refresh removes
+        that single point of failure.
+        """
+        self.send_command_long(
+            MAV_CMD_SET_MESSAGE_INTERVAL,
+            param1=float(message_id),
+            param2=float(interval_us),
+        )
 
     # -- handlers -----------------------------------------------------------
     def add_handler(self, message_type: str, handler: Callable) -> None:

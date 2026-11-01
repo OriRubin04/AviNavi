@@ -87,11 +87,37 @@ def test_identity_extrinsics_put_the_optical_axis_down():
     assert extrinsics.camera_to_body([0.0, 0.0, 1.0]) == pytest.approx([0.0, 0.0, 1.0])
 
 
-def test_extrinsic_yaw_rotates_the_image_axes():
-    """A 90 degree mount yaw sends camera +X to body -X."""
-    extrinsics = CameraExtrinsics(yaw_deg=90.0)
+def test_identity_extrinsics_put_image_x_along_the_nose():
+    """Pins the physical meaning of the identity mount.
+
+    Identity makes the camera axes coincide with the body axes, so image +X
+    (right across the picture) points along body +X (the nose) and image +Y
+    (down the picture) along body +Y (the right wing).  Because image +Y is
+    *down* the picture, the nose appears at the right edge of the frame.
+
+    This test exists because the documentation originally claimed the opposite,
+    and a 90-degree error here shows up as a yaw bias the EKF fights rather
+    than rejects.
+    """
+    extrinsics = CameraExtrinsics()
+    assert extrinsics.camera_to_body([1.0, 0.0, 0.0]) == pytest.approx([1.0, 0.0, 0.0])
+    assert extrinsics.camera_to_body([0.0, 1.0, 0.0]) == pytest.approx([0.0, 1.0, 0.0])
+
+
+@pytest.mark.parametrize(
+    "yaw_deg,image_x_in_body",
+    [
+        (0.0, [1.0, 0.0, 0.0]),     # nose at the right edge
+        (90.0, [0.0, 1.0, 0.0]),    # nose at the top edge
+        (180.0, [-1.0, 0.0, 0.0]),  # nose at the left edge
+        (-90.0, [0.0, -1.0, 0.0]),  # nose at the bottom edge
+    ],
+)
+def test_mount_yaw_table_matches_the_documentation(yaw_deg, image_x_in_body):
+    """The four mountings tabulated in CameraExtrinsics' docstring."""
+    extrinsics = CameraExtrinsics(yaw_deg=yaw_deg)
     assert extrinsics.camera_to_body([1.0, 0.0, 0.0]) == pytest.approx(
-        [0.0, 1.0, 0.0], abs=1e-9
+        image_x_in_body, abs=1e-9
     )
 
 
