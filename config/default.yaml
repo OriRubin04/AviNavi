@@ -61,6 +61,29 @@ camera:
   distortion: []                 # [k1, k2, p1, p2, k3]
   replay_speed: 1.0
 
+  # -- USB (V4L2) camera settings. See docs/usb-camera.md. ------------------
+  # All three of these fail QUIETLY if left alone: the camera works, the bench
+  # looks fine, and the match rate in the air is poor for reasons that never
+  # appear in a log.
+  #
+  # Uncompressed YUYV at 1280x720x30 needs ~442 Mbit/s, more than USB 2.0
+  # delivers, so the camera silently serves fewer frames or a smaller size -
+  # which invalidates the intrinsics above. Check with:
+  #   v4l2-ctl --list-formats-ext -d /dev/video0
+  fourcc: MJPG                   # "" leaves the driver default
+  # Auto-exposure over varying terrain reaches for a long shutter, and
+  # SuperPoint does not detect smeared corners. At 22 m/s and 0.13 m/px,
+  # 1/60 s smears a feature across ~2.8 px; 1/500 s keeps it within 0.3 px.
+  lock_exposure: true
+  max_exposure_s: 0.002          # 1/500 s
+  gain: null                     # null leaves it to the camera; raising gain
+                                 # is the honest price of a short shutter.
+  # V4L2 commonly queues four buffers and ignores CAP_PROP_BUFFERSIZE, so a
+  # 2 Hz loop would read a frame ~0.5 s - eleven metres - out of date.
+  drain_to_newest: true
+  max_frame_age_s: 0.25
+  warmup_frames: 5               # discarded while auto-gain settles
+
 # ---------------------------------------------------------------------------
 # Camera -> body (FRD) extrinsics.
 # Identity = downward-facing camera whose image +X points along body +X (the

@@ -33,16 +33,41 @@ def test_the_shipped_default_config_loads_and_validates():
 
 
 def test_the_default_yaml_covers_every_dataclass_field():
-    """A field with no YAML entry is a field nobody knows they can tune."""
+    """A field with no YAML entry is a field nobody knows they can tune.
+
+    Checked recursively, not just at the top level: the nested sections are
+    where the tunables actually live, and a new one added to a dataclass
+    without a documented default is invisible to whoever has to fly it.
+    """
+    from dataclasses import fields, is_dataclass
+
     from avinavi.config import DEFAULT_CONFIG_PATH
 
     with open(DEFAULT_CONFIG_PATH, "r", encoding="utf-8") as handle:
         raw = yaml.safe_load(handle)
 
-    from dataclasses import fields
+    def missing_under(dataclass_type, documented, path=""):
+        if not isinstance(documented, dict):
+            return ["%s (section is not a mapping in the YAML)" % path.rstrip(".")]
+        gaps = []
+        for field_info in fields(dataclass_type):
+            where = "%s%s" % (path, field_info.name)
+            if field_info.name not in documented:
+                gaps.append(where)
+                continue
+            field_type = field_info.type
+            if isinstance(field_type, str):
+                # Postponed annotations: resolve against the config module.
+                import avinavi.config as config_module
 
-    missing = [f.name for f in fields(Config) if f.name not in raw]
-    assert missing == []
+                field_type = getattr(config_module, field_type, None)
+            if is_dataclass(field_type):
+                gaps.extend(
+                    missing_under(field_type, documented[field_info.name], where + ".")
+                )
+        return gaps
+
+    assert missing_under(Config, raw) == []
 
 
 def test_a_partial_config_falls_back_to_defaults(tmp_path):

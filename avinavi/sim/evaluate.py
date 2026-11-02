@@ -327,7 +327,6 @@ def run_simulation(
     what makes an A/B comparison both fast and fair - every variant sees exactly
     the same ground and the same frames.
     """
-    from ..features.opencv_backend import OpenCVExtractor, RatioTestMatcher
     from ..localization.prewarp import PhotometricNormalizer
 
     cv2 = _require_cv2()
@@ -336,13 +335,17 @@ def run_simulation(
     cache = cache if cache is not None else {}
 
     origin = LocalOrigin(32.0853, 34.7818, 40.0)
-    extractor = extractor or OpenCVExtractor(
-        detector=config.features.detector,
-        max_num_keypoints=config.superpoint.max_num_keypoints,
-        resize_max_side=config.superpoint.resize_max_side,
-    )
-    matcher = matcher or RatioTestMatcher.for_extractor(
-        extractor, ratio=config.features.ratio
+    # Build whichever backend the config names, via the engine's own builders.
+    # Constructing an OpenCV extractor here unconditionally - as this did once -
+    # means a run requested with --backend superpoint silently measures SIFT and
+    # reports it as a SuperPoint result.
+    extractor = extractor or LocalizationEngine._build_extractor(config)
+    matcher = matcher or LocalizationEngine._build_matcher(config)
+    LOG.info(
+        "feature backend: %s (%s / %s)",
+        config.features.backend,
+        type(extractor).__name__,
+        type(matcher).__name__,
     )
     normalizer = (
         PhotometricNormalizer.from_config(config.photometric)
@@ -380,13 +383,24 @@ def run_simulation(
         "database",
         terrain_key,
         tile_size_px,
+        # The backend belongs in the key as much as the detector does: tile
+        # descriptors are not interchangeable between SuperPoint and SIFT, and
+        # reusing one database for both would compare nothing meaningful.
+        config.features.backend,
         config.features.detector,
+        config.superpoint.max_num_keypoints,
         bool(normalizer),
         config.photometric.clip_limit if normalizer else None,
     )
     if db_key not in cache:
         tile_dir = os.path.join(
-            workdir, "tiles_%s_%s" % (config.features.detector, "clahe" if normalizer else "raw")
+            workdir,
+            "tiles_%s_%s_%s"
+            % (
+                config.features.backend,
+                config.features.detector,
+                "clahe" if normalizer else "raw",
+            ),
         )
         cache[db_key] = build_tile_database(
             basemap=basemap,
@@ -459,6 +473,9 @@ def run_simulation(
         settings={
             "prewarp": config.prewarp.enabled,
             "photometric": config.photometric.enabled,
+            "backend": config.features.backend,
+            "extractor": type(extractor).__name__,
+            "matcher": type(matcher).__name__,
             "detector": config.features.detector,
             "basemap_gsd_mpp": basemap_gsd_mpp,
             "appearance_strength": appearance_strength,

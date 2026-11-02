@@ -239,6 +239,39 @@ class CameraConfig:
     #: Directory-source replay speed multiplier (1.0 = real time by fps).
     replay_speed: float = 1.0
 
+    # -- USB (V4L2) specifics ----------------------------------------------
+    # These three settings are what make a USB camera usable on a Pi at flying
+    # speed.  All three fail quietly if left alone: the camera works, the frames
+    # look fine on a bench, and the match rate in the air is poor for reasons
+    # that never appear in a log.  See docs/usb-camera.md.
+    #
+    #: Pixel format to request, as a V4L2 FourCC.  "MJPG" is strongly preferred:
+    #: uncompressed YUYV at 1280x720x30 needs ~442 Mbit/s, which exceeds what
+    #: USB 2.0 actually delivers, so the camera silently serves a lower frame
+    #: rate or refuses the resolution.  Empty leaves the driver default.
+    fourcc: str = "MJPG"
+    #: Lock the exposure rather than letting the camera choose.  Auto-exposure
+    #: over varying terrain will reach for a long shutter, and motion blur
+    #: destroys SuperPoint keypoints outright.
+    lock_exposure: bool = True
+    #: Longest acceptable shutter time.  At 22 m/s and 0.13 m/px (120 m with a
+    #: 900 px focal length), 1/60 s smears a feature across ~2.8 px while
+    #: 1/500 s keeps it inside a third of a pixel.
+    max_exposure_s: float = 0.002
+    #: Manual gain, or null to leave it to the camera.  Raising gain is the
+    #: honest price of a short shutter; noise costs far fewer keypoints than
+    #: blur does.
+    gain: Optional[float] = None
+    #: Capture continuously on a background thread and always hand over the
+    #: newest frame.  V4L2 backends commonly keep a queue of four buffers and
+    #: ignore CAP_PROP_BUFFERSIZE, so a 2 Hz consumer otherwise reads a frame
+    #: that is already ~0.5 s - eleven metres - out of date.
+    drain_to_newest: bool = True
+    #: Refuse a frame older than this instead of localizing a stale image.
+    max_frame_age_s: float = 0.25
+    #: Frames to discard after opening, while auto-gain settles.
+    warmup_frames: int = 5
+
 
 @dataclass
 class ExtrinsicsRotation:
