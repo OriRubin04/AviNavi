@@ -8,7 +8,7 @@ import os
 import numpy as np
 import pytest
 
-from avinavi.geo import BoundingBox, LocalOrigin
+from avinavi.geo import BoundingBox, LocalOrigin, haversine_distance_m
 from avinavi.mapdb.database import MapCoverageError, MapDatabase
 from avinavi.mapdb.tile import MapTile, TileFeatures, TileFormatError, TileMetadata
 from avinavi.types import GeoPoint, NEDPosition
@@ -193,6 +193,91 @@ def test_a_corrupt_index_falls_back_to_scanning(grid_database):
     with open(os.path.join(root, "index.json"), "w", encoding="utf-8") as handle:
         handle.write("{not json")
     assert len(MapDatabase.load(root)) == 9
+
+
+def test_an_index_left_over_from_an_earlier_build_is_not_trusted(grid_database):
+    """A stale index must never override the tiles' own georeferencing.
+
+    This is a regression test for a bug with the worst possible failure shape.
+    Rebuilding a database over an existing directory rewrote every tile's
+    metadata but left ``index.json`` describing the previous build; because the
+    index was trusted unconditionally, the system reported positions against
+    the *old* georeferencing. Imagery, features and matching were all correct,
+    and every fix was offset by a constant 100 m with nothing reporting it -
+    precisely the confident, plausible, consistently wrong position the EKF
+    cannot reject.
+    """
+    root, origin = grid_database
+    MapDatabase.load(root).write_index()
+
+    # Rebuild the same tile ids 100 m further north, as a re-tiling would.
+    shifted = origin.to_geo(NEDPosition(100.0, 0.0, 0.0))
+    for row in range(3):
+        for col in range(3):
+            south_west = origin.to_geo(
+                NEDPosition((row - 1.5) * 200.0 + 100.0, (col - 1.5) * 200.0, 0.0)
+            )
+            north_east = origin.to_geo(
+                NEDPosition((row - 0.5) * 200.0 + 100.0, (col - 0.5) * 200.0, 0.0)
+            )
+            write_tile(
+                root,
+                "tile_%d%d" % (row, col),
+                BoundingBox(
+                    south_west.lon_deg,
+                    south_west.lat_deg,
+                    north_east.lon_deg,
+                    north_east.lat_deg,
+                ),
+            )
+    # The index on disk still describes the pre-shift tiling.
+    os.utime(os.path.join(root, "index.json"), (0, 0))
+
+    database = MapDatabase.load(root)
+    assert database.tile_containing(shifted) is not None
+
+    # The decisive check: the coverage must have moved north with the rebuild.
+    # The old tiling reached 300 m north of the origin, the new one 400 m, so
+    # a database that still reports 300 m is reading the stale index.
+    north_edge_m = haversine_distance_m(
+        origin.geo, GeoPoint(database.coverage.north, origin.lon_deg, 0.0)
+    )
+    assert north_edge_m == pytest.approx(400.0, abs=2.0), (
+        "the stale index was trusted: coverage reaches %.0f m north, which is "
+        "the previous build's georeferencing" % north_edge_m
+    )
+
+
+def test_an_index_that_disagrees_with_the_tiles_on_disk_is_rescanned(grid_database):
+    """A changed tile *set* is staleness too, even with fresh timestamps.
+
+    Copying a database between machines can preserve mtimes, so the timestamp
+    check alone is not enough; the tile set itself has to agree.
+    """
+    root, origin = grid_database
+    MapDatabase.load(root).write_index()
+
+    extra_sw = origin.to_geo(NEDPosition(400.0, 400.0, 0.0))
+    extra_ne = origin.to_geo(NEDPosition(600.0, 600.0, 0.0))
+    write_tile(
+        root,
+        "tile_extra",
+        BoundingBox(
+            extra_sw.lon_deg, extra_sw.lat_deg, extra_ne.lon_deg, extra_ne.lat_deg
+        ),
+    )
+    # Make every timestamp agree, so only the set mismatch can reveal the index
+    # is out of date.
+    for entry in os.listdir(root):
+        path = os.path.join(root, entry)
+        target = (
+            os.path.join(path, "metadata.json") if os.path.isdir(path) else path
+        )
+        if os.path.exists(target):
+            os.utime(target, (1_000_000, 1_000_000))
+    os.utime(os.path.join(root, "index.json"), (1_000_000, 1_000_000))
+
+    assert len(MapDatabase.load(root)) == 10
 
 
 def test_a_tile_with_broken_metadata_is_skipped(grid_database):

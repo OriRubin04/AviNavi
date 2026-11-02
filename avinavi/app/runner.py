@@ -34,7 +34,7 @@ import logging
 import math
 import threading
 import time
-from typing import Optional
+from typing import Optional, Union
 
 from ..camera import CameraError, create_camera
 from ..config import Config
@@ -46,11 +46,19 @@ from ..localization.propagator import PosePropagator
 from ..mapdb.database import MapCoverageError, MapDatabase
 from ..mavlink.connection import MavlinkConnection, MavlinkConnectionError
 from ..mavlink.external_navigation import ExternalNavigationPublisher
+from ..mavlink.gps_input import GpsInputPublisher
 from ..mavlink.initial_position import InitialPositionError, InitialPositionProvider
+from ..mavlink.reanchor import ReanchorListener, ReanchorRequest
 from ..types import GeoPoint, InvalidReason, VisualFix
 from .safety import SafetyGate
 
 LOG = logging.getLogger(__name__)
+
+
+#: The two output paths present the same interface to the runner: ``publish``,
+#: ``publish_failure``, ``enabled``, ``message`` and the three counters.  Which
+#: one is built depends on ``output.message``; see :meth:`Runner._build_publisher`.
+Publisher = Union[ExternalNavigationPublisher, GpsInputPublisher]
 
 
 class RunnerError(RuntimeError):
@@ -73,8 +81,9 @@ class Runner:
         self.engine: Optional[LocalizationEngine] = None
         self.camera = None
         self.connection: Optional[MavlinkConnection] = None
-        self.publisher: Optional[ExternalNavigationPublisher] = None
+        self.publisher: Optional[Publisher] = None
         self.initial_position: Optional[InitialPositionProvider] = None
+        self.reanchor_listener: Optional[ReanchorListener] = None
 
         self._stop = threading.Event()
         self._threads = []
@@ -109,6 +118,11 @@ class Runner:
 
         origin, start = self._acquire_initial_position()
         self.engine.initialize(origin, start)
+        # GPS_INPUT carries absolute lat/lon, so that publisher needs the origin
+        # to convert the local NED solution back out.  ODOMETRY does not: it is
+        # already expressed in the local frame the autopilot holds.
+        if isinstance(self.publisher, GpsInputPublisher):
+            self.publisher.set_origin(origin)
 
         self.camera = create_camera(self.config.camera)
         try:
@@ -132,9 +146,7 @@ class Runner:
         except MavlinkConnectionError as exc:
             raise RunnerError(str(exc)) from exc
 
-        self.publisher = ExternalNavigationPublisher.from_config(
-            self.connection, self.config.output
-        )
+        self.publisher = self._build_publisher()
         if self.publisher.enabled:
             LOG.warning(
                 "external navigation TRANSMISSION IS ENABLED (%s). Confirm the "
@@ -146,6 +158,28 @@ class Runner:
                 "external navigation transmission is disabled; computing and "
                 "logging only (output.send_to_autopilot = false)"
             )
+
+        if self.config.reanchor.enabled:
+            self.reanchor_listener = ReanchorListener.from_config(
+                self.config.reanchor, self.connection
+            )
+            self.reanchor_listener.start()
+
+    def _build_publisher(self) -> Publisher:
+        """Pick the output path named by ``output.message``.
+
+        ``GPS_INPUT`` and the two external-navigation messages are handled by
+        different ArduPilot subsystems with different compile-time gates, so
+        this is not a cosmetic choice: on a 1 MB board such as the
+        MatekF405-Wing, a stock ArduPlane build has *all three* compiled out and
+        every one of them fails silently.  See
+        ``docs/flight-controller-compatibility.md``.
+        """
+        if self.config.output.message == "gps_input":
+            return GpsInputPublisher.from_config(self.connection, self.config.output)
+        return ExternalNavigationPublisher.from_config(
+            self.connection, self.config.output
+        )
 
     def _acquire_initial_position(self):
         """Get the origin, and the tile-search seed, before anything else runs."""
@@ -277,6 +311,9 @@ class Runner:
             except Exception:  # pragma: no cover - best-effort teardown
                 LOG.debug("error closing the camera", exc_info=True)
             self.camera = None
+        if self.reanchor_listener is not None:
+            self.reanchor_listener.stop()
+            self.reanchor_listener = None
         if self.connection is not None:
             self.connection.close()
             self.connection = None
@@ -304,6 +341,8 @@ class Runner:
             # Schedule from the previous target, not from now, so a slow cycle
             # does not permanently shift the phase - but never build up a backlog.
             next_cycle = max(next_cycle + interval, now + interval * 0.25)
+
+            self._apply_pending_reanchor()
 
             try:
                 frame = self.camera.read()
@@ -341,9 +380,45 @@ class Runner:
                 self._frames_exhausted.set()
                 return
 
+    def _apply_pending_reanchor(self) -> None:
+        """Move the search window if the operator clicked the map.
+
+        This only changes *where the next frame looks*.  It is deliberately not
+        a position fix: the frame still has to earn its match, and until it
+        does, nothing is published.  A click is therefore always safe, including
+        mid-flight with transmission enabled.
+        """
+        if self.reanchor_listener is None:
+            return
+        request: Optional[ReanchorRequest] = self.reanchor_listener.take()
+        if request is None:
+            return
+
+        previous = self.engine.search_center
+        moved = (
+            haversine_distance_m(previous, request.geo) if previous is not None else None
+        )
+        self.engine.reanchor(request.geo, request.radius_m)
+        # Any propagated pose still in flight was derived from the old area, so
+        # it must not survive the move.
+        self.propagator.clear()
+        self.safety.reset()
+
+        self._notify(
+            "re-anchored to %.6f, %.6f (r=%.0f m, via %s%s)"
+            % (
+                request.geo.lat_deg,
+                request.geo.lon_deg,
+                self.engine.search_radius_m,
+                request.source,
+                "" if moved is None else ", %.0f m from the last search centre" % moved,
+            )
+        )
+
     def _localize(self, frame) -> VisualFix:
         """Run one cycle, feeding in autopilot attitude/height when available."""
         roll = pitch = 0.0
+        yaw = None
         height_hint = None
         if self.connection is not None:
             state = self.connection.state
@@ -352,6 +427,10 @@ class Runner:
             if state.attitude_age() < 0.5 and state.roll_rad is not None:
                 roll = state.roll_rad
                 pitch = state.pitch_rad
+                # Yaw is passed separately: it steers the north-up rectification
+                # and seeds the yaw-bias estimator, but unlike roll and pitch
+                # there is no safe default, so None means "do not assume".
+                yaw = state.yaw_rad
             if state.height_age() < 1.0 and state.height_above_origin_m is not None:
                 origin = self.engine.origin
                 terrain = self.config.map.terrain_alt_m
@@ -365,6 +444,7 @@ class Runner:
                 frame.image,
                 roll_rad=roll,
                 pitch_rad=pitch,
+                yaw_rad=yaw,
                 height_hint_m=height_hint,
                 timestamp_unix=frame.timestamp_unix,
             )

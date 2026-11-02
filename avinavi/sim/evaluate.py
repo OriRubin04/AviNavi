@@ -37,6 +37,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import shutil
 import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -73,6 +74,15 @@ class SimulationReport:
     valid_fixes: int = 0
     false_fixes: int = 0
     position_errors_m: List[float] = field(default_factory=list)
+    #: Signed (north, east, down) error per accepted fix.  Recorded separately
+    #: from the magnitude because the two failure modes look identical in a
+    #: magnitude histogram and could not be more different: scattered errors
+    #: mean the matcher is latching onto the wrong ground, while a *constant*
+    #: offset means a frame-convention or georeferencing bug in the harness or
+    #: the pose chain.  Keeping only the magnitude once cost a whole run.
+    position_error_vectors_m: List[Tuple[float, float, float]] = field(
+        default_factory=list
+    )
     yaw_errors_deg: List[float] = field(default_factory=list)
     inliers: List[int] = field(default_factory=list)
     confidences: List[float] = field(default_factory=list)
@@ -108,6 +118,28 @@ class SimulationReport:
     def percentile(self, values: Sequence[float], q: float) -> Optional[float]:
         return float(np.percentile(values, q)) if len(values) else None
 
+    @property
+    def bias_ned_m(self) -> Optional[Tuple[float, float, float]]:
+        """Median signed error per axis.
+
+        If this is large while the *scatter* about it is small, the run is
+        measuring a systematic offset, not localization quality.
+        """
+        if not self.position_error_vectors_m:
+            return None
+        array = np.asarray(self.position_error_vectors_m, dtype=float)
+        median = np.median(array, axis=0)
+        return (float(median[0]), float(median[1]), float(median[2]))
+
+    @property
+    def scatter_about_bias_m(self) -> Optional[float]:
+        """Median horizontal distance from the bias: the real error spread."""
+        if not self.position_error_vectors_m:
+            return None
+        array = np.asarray(self.position_error_vectors_m, dtype=float)
+        centred = array[:, :2] - np.median(array[:, :2], axis=0)
+        return float(np.median(np.hypot(centred[:, 0], centred[:, 1])))
+
     def as_dict(self) -> Dict:
         return {
             "label": self.label,
@@ -124,6 +156,12 @@ class SimulationReport:
                 "p90": _round(self.percentile(self.position_errors_m, 90)),
                 "max": _round(max(self.position_errors_m) if self.position_errors_m else None),
             },
+            "bias_ned_m": (
+                [_round(v) for v in self.bias_ned_m]
+                if self.bias_ned_m is not None
+                else None
+            ),
+            "scatter_about_bias_m": _round(self.scatter_about_bias_m),
             "yaw_error_deg": {
                 "median": _round(self.percentile(self.yaw_errors_deg, 50)),
                 "p90": _round(self.percentile(self.yaw_errors_deg, 90)),
@@ -154,6 +192,23 @@ class SimulationReport:
 
 def _round(value, digits: int = 2):
     return None if value is None else round(float(value), digits)
+
+
+def _trajectory_fingerprint(trajectory: Sequence[TrajectoryPoint]) -> tuple:
+    """A cheap content-derived identity for a trajectory."""
+    if not trajectory:
+        return (0,)
+    first, last = trajectory[0], trajectory[-1]
+    return (
+        len(trajectory),
+        round(first.north_m, 3),
+        round(first.east_m, 3),
+        round(first.yaw_rad, 6),
+        round(last.north_m, 3),
+        round(last.east_m, 3),
+        round(last.yaw_rad, 6),
+        round(last.time_s, 3),
+    )
 
 
 def _bank_band(roll_rad: float) -> str:
@@ -190,6 +245,13 @@ def build_tile_database(
     from ..mapdb.builder import write_tile
     from ..mapdb.tile import TileFeatures
 
+    # Start from an empty directory, always. Writing a new tiling over an old
+    # one leaves orphan tiles and a stale index, and the result is a database
+    # that loads cleanly while describing ground that is no longer there. The
+    # measurement this harness exists to produce was invalidated exactly once
+    # that way, silently; a rebuild is cheap and a wrong answer is not.
+    if os.path.isdir(output_dir):
+        shutil.rmtree(output_dir)
     os.makedirs(output_dir, exist_ok=True)
     height, width = basemap.shape[:2]
     stride = max(1, int(round(tile_size_px * (1.0 - overlap))))
@@ -367,8 +429,13 @@ def run_simulation(
         extrinsics=extrinsics,
     )
 
-    frames_key = ("frames", variant_key, id(trajectory), render_settings.seed,
-                  render_settings.width_px, render_settings.exposure_s)
+    # Key the frame cache on the trajectory's *contents*, not on id(): a list
+    # that has been garbage collected can have its id reused, which would serve
+    # frames rendered for a different flight path and produce a position error
+    # that looks like a localization failure.
+    frames_key = ("frames", variant_key, _trajectory_fingerprint(trajectory),
+                  render_settings.seed, render_settings.width_px,
+                  render_settings.exposure_s)
     if frames_key not in cache:
         LOG.info("rendering %d frames", len(trajectory))
         rendered = []
@@ -434,6 +501,14 @@ def run_simulation(
             error = haversine_distance_m(truth_geo, fix.geo)
             report.valid_fixes += 1
             report.position_errors_m.append(error)
+            if fix.position_ned is not None:
+                report.position_error_vectors_m.append(
+                    (
+                        fix.position_ned.north_m - point.north_m,
+                        fix.position_ned.east_m - point.east_m,
+                        fix.position_ned.down_m - (origin.alt_m - point.height_m),
+                    )
+                )
             report.inliers.append(fix.quality.number_of_inliers)
             report.confidences.append(fix.confidence)
             if fix.yaw_rad is not None:
@@ -502,20 +577,33 @@ def _wrong_tile_inliers(engine, frame, wrong_tile, config: Config) -> int:
 def compare(reports: Sequence[SimulationReport]) -> str:
     """Render several runs as a comparison table."""
     header = (
-        "%-26s %8s %8s %9s %9s %8s %8s %7s"
-        % ("run", "lock", "false", "err p50", "err p90", "inl p50", "sep", "ms")
+        "%-26s %8s %8s %9s %9s %9s %8s %8s %7s"
+        % (
+            "run",
+            "lock",
+            "false",
+            "err p50",
+            "scatter",
+            "bias|NE|",
+            "inl p50",
+            "sep",
+            "ms",
+        )
     )
     lines = [header, "-" * len(header)]
     for report in reports:
         data = report.as_dict()
+        bias = report.bias_ned_m
+        bias_horiz = None if bias is None else math.hypot(bias[0], bias[1])
         lines.append(
-            "%-26s %7.1f%% %7.1f%% %9s %9s %8s %8s %7s"
+            "%-26s %7.1f%% %7.1f%% %9s %9s %9s %8s %8s %7s"
             % (
                 report.label[:26],
                 100.0 * report.lock_rate,
                 100.0 * report.false_fix_rate,
                 _fmt(data["position_error_m"]["median"]),
-                _fmt(data["position_error_m"]["p90"]),
+                _fmt(data["scatter_about_bias_m"]),
+                _fmt(bias_horiz),
                 _fmt(data["inliers"]["median"], 0),
                 _fmt(data["separation_true_over_wrong"], 0),
                 _fmt(
@@ -526,6 +614,20 @@ def compare(reports: Sequence[SimulationReport]) -> str:
                 ),
             )
         )
+    # A large bias with small scatter is a bug, not a localization result; say
+    # so here rather than leaving it to be read off the columns.
+    for report in reports:
+        bias = report.bias_ned_m
+        scatter = report.scatter_about_bias_m
+        if bias is None or scatter is None:
+            continue
+        horiz = math.hypot(bias[0], bias[1])
+        if horiz > 10.0 and scatter < 0.25 * horiz:
+            lines.append(
+                "NOTE  %s: errors are a CONSTANT offset of N%+.1f E%+.1f D%+.1f m "
+                "(scatter only %.1f m). That is a georeferencing or frame bug, "
+                "not localization quality." % (report.label, bias[0], bias[1], bias[2], scatter)
+            )
     return "\n".join(lines)
 
 

@@ -77,11 +77,13 @@ class MapDatabase:
         index_path = os.path.join(self.path, INDEX_FILENAME)
         if not os.path.exists(index_path):
             return None
+        if self._index_is_stale(index_path):
+            return None
         try:
             with open(index_path, "r", encoding="utf-8") as handle:
                 payload = json.load(handle)
             entries = payload["tiles"] if isinstance(payload, dict) else payload
-            return [
+            metadatas = [
                 TileMetadata.from_dict(
                     entry, os.path.join(self.path, entry["directory"])
                 )
@@ -90,6 +92,86 @@ class MapDatabase:
         except (OSError, ValueError, KeyError) as exc:
             LOG.warning("ignoring unreadable %s (%s); rescanning", index_path, exc)
             return None
+
+        # The mtime check above catches a rebuilt database. This catches one
+        # whose tile *set* changed - tiles added, removed, or renamed - which
+        # can happen with timestamps that look perfectly fresh, for instance
+        # after copying a database between machines.
+        on_disk = {
+            entry
+            for entry in os.listdir(self.path)
+            if os.path.exists(os.path.join(self.path, entry, METADATA_FILENAME))
+        }
+        indexed = {
+            os.path.basename(m.directory.rstrip("/\\")) for m in metadatas
+        }
+        if on_disk != indexed:
+            LOG.warning(
+                "%s lists %d tiles but %d are on disk (%d only in the index, "
+                "%d only on disk); ignoring the index and rescanning",
+                index_path,
+                len(indexed),
+                len(on_disk),
+                len(indexed - on_disk),
+                len(on_disk - indexed),
+            )
+            return None
+        return metadatas
+
+    def _index_is_stale(self, index_path: str) -> bool:
+        """Is ``index.json`` older than the tiles it claims to describe?
+
+        This check exists because of a bug that cost a whole measurement run and
+        would have been far worse in the air.  The index is a cache of the
+        per-tile ``metadata.json`` files, written to spare a directory scan at
+        startup.  Rebuilding a database over an existing directory rewrites
+        every tile's own metadata but leaves the index describing the *previous*
+        build, and because the index was trusted unconditionally, the whole
+        system then used the old georeferencing: a measurement with correct
+        imagery, correct features, correct matching, and a constant 100 m
+        position offset that nothing reported.
+
+        In flight that is the worst possible failure shape - a confident,
+        plausible, consistently wrong position, which is exactly what the EKF
+        has no way to reject.  So the index is now treated as what it is, a
+        cache, and revalidated on every load.  One ``stat`` per tile is nothing
+        against startup I/O, and if the check is wrong it is wrong in the safe
+        direction: a needless rescan.
+        """
+        try:
+            index_mtime = os.path.getmtime(index_path)
+        except OSError:
+            return True
+
+        newest_tile_mtime = 0.0
+        newest_tile = None
+        try:
+            entries = sorted(os.listdir(self.path))
+        except OSError:
+            return True
+        for entry in entries:
+            metadata_path = os.path.join(self.path, entry, METADATA_FILENAME)
+            try:
+                mtime = os.path.getmtime(metadata_path)
+            except OSError:
+                continue
+            if mtime > newest_tile_mtime:
+                newest_tile_mtime = mtime
+                newest_tile = entry
+
+        # A one-second grace: the builder writes the tiles and then the index,
+        # so on a coarse-grained filesystem they can share a timestamp.
+        if newest_tile_mtime > index_mtime + 1.0:
+            LOG.warning(
+                "%s is older than the tiles it describes (%s is newer); it is a "
+                "stale cache from an earlier build and is being ignored. "
+                "Rescanning the tiles themselves - run 'avinavi map-info' to "
+                "rewrite the index.",
+                index_path,
+                newest_tile,
+            )
+            return True
+        return False
 
     def _scan(self) -> List[TileMetadata]:
         found: List[TileMetadata] = []
