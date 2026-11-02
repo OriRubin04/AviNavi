@@ -328,8 +328,15 @@ def write_tile(
     return metadata
 
 
-def summarise(database_path: str) -> dict:
-    """Human-readable summary of a database, used by ``avinavi map-info``."""
+def summarise(database_path: str, score_localizability: bool = True) -> dict:
+    """Human-readable summary of a database, used by ``avinavi map-info``.
+
+    ``score_localizability`` adds the offline prediction of which tiles will not
+    match (see :mod:`avinavi.mapdb.localizability`).  It reads every tile's
+    features, so it is the expensive part of this call - but knowing before a
+    flight that part of the route is over ground that cannot be localized is
+    worth considerably more than the seconds it takes.
+    """
     database = MapDatabase.load(database_path, feature_cache_size=1)
     coverage = database.coverage
     resolutions = [t.ground_resolution_mpp for t in database]
@@ -341,9 +348,21 @@ def summarise(database_path: str) -> dict:
             or os.path.exists(os.path.splitext(t.metadata.feature_path)[0] + ".npz")
         )
     ]
+    localizability = None
+    if score_localizability and not missing_features:
+        from .localizability import score_database, summarise_scores
+
+        localizability = summarise_scores(score_database(database))
+    elif score_localizability:
+        localizability = {
+            "skipped": "%d tiles have no precomputed features; run "
+            "'avinavi extract-features' first" % len(missing_features)
+        }
+
     return {
         "path": database_path,
         "tiles": len(database),
+        "localizability": localizability,
         "coverage": coverage.as_tuple() if coverage else None,
         "coverage_center": (
             {"lat": coverage.center.lat_deg, "lon": coverage.center.lon_deg}
