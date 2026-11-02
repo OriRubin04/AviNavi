@@ -91,6 +91,10 @@ class SimulationReport:
     #: Lock rate split by bank angle, which is where a fixed wing struggles.
     by_bank: Dict[str, Tuple[int, int]] = field(default_factory=dict)
     wrong_tile_inliers: List[int] = field(default_factory=list)
+    #: Position in the candidate list that produced each accepted fix.  This
+    #: decides whether ``max_candidate_tiles`` can be lowered, since that limit
+    #: multiplies the dominant cost.
+    candidate_ranks: List[int] = field(default_factory=list)
     trajectory: Dict = field(default_factory=dict)
     settings: Dict = field(default_factory=dict)
 
@@ -185,6 +189,10 @@ class SimulationReport:
             "failure_reasons": dict(
                 sorted(self.failure_reasons.items(), key=lambda kv: -kv[1])
             ),
+            "winning_candidate_rank": {
+                str(rank): self.candidate_ranks.count(rank)
+                for rank in sorted(set(self.candidate_ranks))
+            },
             "trajectory": self.trajectory,
             "settings": self.settings,
         }
@@ -528,6 +536,9 @@ def run_simulation(
                 )
             report.inliers.append(fix.quality.number_of_inliers)
             report.confidences.append(fix.confidence)
+            rank = engine.last_candidate_rank
+            if rank is not None:
+                report.candidate_ranks.append(int(rank))
             if fix.yaw_rad is not None:
                 report.yaw_errors_deg.append(
                     abs(math.degrees(wrap_pi(fix.yaw_rad - point.yaw_rad)))

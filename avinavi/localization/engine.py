@@ -167,6 +167,8 @@ class LocalizationEngine:
 
         self._origin: Optional[LocalOrigin] = None
         self._search_center: Optional[GeoPoint] = None
+        #: Position in the candidate list that produced the last result.
+        self._last_candidate_rank: Optional[int] = None
         self._search_radius_m: float = config.tile_search.initial_search_radius_m
         self._last_tile_id: Optional[str] = None
         self._consecutive_failures: int = 0
@@ -592,8 +594,18 @@ class LocalizationEngine:
         """Match every candidate and keep the strongest geometrically valid one."""
         best_valid: Optional[Tuple[MapTile, MatchResult, GeometricResult]] = None
         best_attempt: Optional[Tuple[MapTile, MatchResult, GeometricResult]] = None
+        # Which position in the candidate list each result came from. Recorded
+        # because the candidate limit is a direct cost multiplier - LightGlue
+        # runs once per candidate - so knowing whether the winner is usually
+        # first or usually fourth is what decides whether the limit can be
+        # lowered. Two plausible explanations for the measured sensitivity to
+        # that limit (list ordering, and the last-matched-tile preference) were
+        # both tested and refuted; this is the direct observable instead.
+        self._last_candidate_rank = None
+        best_valid_rank: Optional[int] = None
+        best_attempt_rank: Optional[int] = None
 
-        for tile in candidates:
+        for rank, tile in enumerate(candidates):
             try:
                 tile_features = self.database.features_for(tile)
             except TileFormatError as exc:
@@ -614,13 +626,18 @@ class LocalizationEngine:
 
             if best_attempt is None or geometry.num_inliers > best_attempt[2].num_inliers:
                 best_attempt = candidate
+                best_attempt_rank = rank
             if geometry.ok and (
                 best_valid is None
                 or (geometry.num_inliers, geometry.num_matches)
                 > (best_valid[2].num_inliers, best_valid[2].num_matches)
             ):
                 best_valid = candidate
+                best_valid_rank = rank
 
+        self._last_candidate_rank = (
+            best_valid_rank if best_valid is not None else best_attempt_rank
+        )
         return best_valid or best_attempt
 
     # -- window management --------------------------------------------------
@@ -666,6 +683,16 @@ class LocalizationEngine:
             self._consecutive_failures >= self.config.tile_search.failures_before_growth
             and self._search_radius_m >= self.config.tile_search.max_search_radius_m
         )
+
+    @property
+    def last_candidate_rank(self) -> Optional[int]:
+        """Zero-based position in the candidate list of the last result.
+
+        A diagnostic for ``lightglue.max_candidate_tiles``: that limit
+        multiplies the dominant cost, so whether the winning tile is normally
+        first or normally fourth is what decides if it can be lowered.
+        """
+        return self._last_candidate_rank
 
     @property
     def rectified_fraction(self) -> float:
