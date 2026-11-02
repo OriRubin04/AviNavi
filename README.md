@@ -6,7 +6,16 @@ and LightGlue against a georeferenced map on a Raspberry Pi 5.
 The operator picks the aircraft's starting position once, on the Mission
 Planner map. From then on the system localizes by matching the downward camera
 against precomputed map tiles, and feeds the result to ArduPilot's EKF as
-MAVLink `ODOMETRY`. **No GPS is involved in the localization loop.**
+MAVLink `GPS_INPUT` or `ODOMETRY`. **No GPS is involved in the localization
+loop.** The operator can also click the map at any time to tell the system where
+to resume searching after a lost lock.
+
+> **Read [docs/flight-controller-compatibility.md](docs/flight-controller-compatibility.md)
+> before wiring anything.** On a stock ArduPlane build for a 1 MB board such as
+> the MATEKSYS F405-WING, `ODOMETRY`, `VISION_POSITION_ESTIMATE` *and*
+> `GPS_INPUT` are all compiled out, and every one of them fails silently. Search
+> your Full Parameter List for `VISO_TYPE`: if it is not there, no amount of
+> configuration will make the external-navigation path work.
 
 ```
               OPERATOR
@@ -41,11 +50,19 @@ MAVLink `ODOMETRY`. **No GPS is involved in the localization loop.**
         +---------+---------+
         |                   |
         v                   v
- Update tile search    MAVLink ODOMETRY
-        |                   |
+ Update tile search    MAVLink GPS_INPUT
+        |                   |    (or ODOMETRY)
         +--> next frame     v
                         ArduPilot EKF
 ```
+
+Each live frame is first rectified to a synthetic nadir, north-up, tile-scale
+view. On a fixed wing that is not an optimization but a requirement: SuperPoint
+carries no orientation channel and LightGlue was trained on pairs within roughly
+±31.5°, while 10° of bank already skews the ground sample distance 1.5× across
+the frame and ArduPlane permits 45°. See
+[docs/matching-robustness.md](docs/matching-robustness.md) for the measured
+effect.
 
 ## Documentation
 
@@ -56,6 +73,10 @@ MAVLink `ODOMETRY`. **No GPS is involved in the localization loop.**
 | [docs/ardupilot-configuration.md](docs/ardupilot-configuration.md) | Exact parameter names and values, verified against the ArduPilot source |
 | [docs/map-database.md](docs/map-database.md) | Tile format, building a database, sizing and overlap |
 | [docs/safety-and-testing.md](docs/safety-and-testing.md) | The testing progression, the safety gates, failure handling |
+| [docs/flight-controller-compatibility.md](docs/flight-controller-compatibility.md) | **Read first.** Which boards can accept a visual position at all, and how to check yours |
+| [docs/matching-robustness.md](docs/matching-robustness.md) | Why frames are rectified before matching, and what it measures |
+| [docs/usb-camera.md](docs/usb-camera.md) | The three USB camera settings that fail silently on a Pi |
+| [docs/manual-reanchor.md](docs/manual-reanchor.md) | Clicking the map to say where to resume searching |
 
 ## Installation
 
@@ -172,10 +193,21 @@ an honest measurement noise rather than being silently over-trusted.
 
 ### One authoritative external-navigation source
 
-`ODOMETRY` is the production interface. `VISION_POSITION_ESTIMATE` is available
-as a prototype fallback for builds where `ODOMETRY` handling is not compiled in.
-The publisher sends exactly one of them; there is no configuration in which both
-go out, because two external navigation sources fuse against each other.
+Three interfaces exist and the publisher sends **exactly one**. There is no
+configuration in which two go out, because two external navigation sources fuse
+against each other.
+
+| `output.message` | ArduPilot side | Use when |
+| --- | --- | --- |
+| `gps_input` (default) | `AP_GPS_MAV`, `GPS1_TYPE=14` | 1 MB board with a custom build; the only interface a single feature flag can provide |
+| `odometry` | `GCS_MAVLINK::handle_odometry` | 2 MB+ board on stock firmware; carries velocity and a full covariance |
+| `vision_position_estimate` | `AP_VisualOdom` | prototype fallback |
+
+`gps_input` is the default because of the compatibility problem above: on the
+F405-WING it is the one path reachable with a single build flag. Its cost is
+that it is a *GPS*, so the satellite count and DOP values are necessarily
+fabricated — but `horiz_accuracy` carries the real confidence-derived sigma, and
+that is the field ArduPilot actually weights the fix by.
 
 ## Configuration
 
@@ -241,13 +273,21 @@ avinavi/
 │   └── builder.py       offline slicing and feature precomputation
 ├── localization/
 │   ├── engine.py        the localization cycle
+│   ├── prewarp.py       rectify to nadir/north-up/tile-GSD before matching
 │   ├── pose.py          homography -> geographic position and yaw
 │   ├── confidence.py    the score and the validity gate
 │   └── propagator.py    forward propagation between fixes
+├── features/
+│   ├── superpoint.py    SuperPoint extraction
+│   ├── lightglue_matcher.py   LightGlue matching
+│   └── opencv_backend.py      SIFT/AKAZE/ORB, the no-torch fallback
 ├── mavlink/
 │   ├── connection.py    transport, inbound state, heartbeat tracking
 │   ├── initial_position.py   the operator-selected origin
-│   └── external_navigation.py   ODOMETRY and VISION_POSITION_ESTIMATE
+│   ├── gps_input.py     GPS_INPUT, the default output path
+│   ├── external_navigation.py   ODOMETRY and VISION_POSITION_ESTIMATE
+│   └── reanchor.py      the operator's map click, over five channels
+├── sim/                 fixed-wing flight, terrain and camera simulation
 ├── app/
 │   ├── runner.py        the three modes and the main loop
 │   └── safety.py        the gate before the flight controller
