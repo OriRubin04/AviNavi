@@ -60,12 +60,16 @@ pixel-identical to the tiles. Reproduce with `tools/run_experiment.py`.
 
 **SuperPoint + LightGlue** (60 cycles per variant):
 
-| Variant | Lock | False fix | Error p50 |
-| --- | --- | --- | --- |
-| baseline (raw frames) | **0.0%** | — | — |
-| + CLAHE only | **0.0%** | — | — |
-| + rectify only | **41.7%** | 0.0% | 0.71 m |
-| + rectify + CLAHE | *(see results JSON)* | | |
+| Variant | Lock | False fix | Error p50 | Inliers p50 |
+| --- | --- | --- | --- | --- |
+| baseline (raw frames) | **0.0%** | — | — | — |
+| + CLAHE only | **0.0%** | — | — | — |
+| + rectify only | **56.7%** | 0.0% | 0.58 m | 34 |
+| + rectify + CLAHE | 53.3% | 0.0% | 0.58 m | 32 |
+
+The `+ rectify only` figure was 41.7% before the `resize_max_side` sentinel bug
+(§5.3) was fixed. Describing a 1024 px map tile at full resolution rather than
+at the camera's 640 px working size is worth **15 points of lock rate**.
 
 **SIFT + ratio test** (300 cycles per variant, the fast baseline):
 

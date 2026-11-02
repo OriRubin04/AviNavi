@@ -40,6 +40,18 @@ are the ones with a plausible mean-to-p95 ratio.
 
 Zero false fixes in every configuration.
 
+> **This table predates the `resize_max_side` sentinel fix and is being
+> re-measured.** Two things change. The lock rates are understated — the same
+> A/B went from 41.7% to 56.7% once map tiles were described at full resolution
+> instead of the camera's working size. And the two `resize_max_side` rows no
+> longer mean what they meant: under the bug that setting controlled the
+> resolution of *both* the live frame and the tile features, so "640 and 384
+> behave identically" was measured with both sides moving together. With the fix
+> it affects the live frame alone, and that row needs re-running before the
+> "resolution is a free lever" conclusion can be trusted. The
+> `max_candidate_tiles` and `max_num_keypoints` conclusions are unaffected by
+> the fix, since neither setting was entangled with it.
+
 ## What the sweep says
 
 **1. `max_candidate_tiles` is the only real time lever, and it is expensive.**
@@ -52,10 +64,13 @@ buys both time and hit rate at once**, because fewer candidates would be needed
 for the same result. The frame-to-frame odometry narrowing the window between
 map fixes is exactly that mechanism.
 
-**2. Frame resolution is nearly free to reduce, and buys nothing.** 640 → 384
-changes neither lock rate (45.0% either way) nor latency (2438 → 2345 ms). So
-extraction is **not** the bottleneck; matching is. Lowering the live frame
-resolution is not a useful lever here.
+**2. Frame resolution appeared to be nearly free to reduce, and to buy
+nothing.** 640 → 384 changed neither lock rate (45.0% either way) nor latency
+(2438 → 2345 ms), which says extraction is **not** the bottleneck — matching is.
+Treat the specific numbers as provisional: as noted above, this setting was
+entangled with the tile resolution when the sweep was run, so the row is being
+re-measured. The broad conclusion that extraction is not where the time goes is
+consistent with everything else here.
 
 **3. Keypoint count has a cliff.** 1024 → 512 costs almost nothing in lock rate
 (45.0% → 42.5%) and actually *improves* the median error. 512 → 256 collapses it

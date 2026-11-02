@@ -2,7 +2,7 @@
 
 **Summary: on a fixed wing, matching raw camera frames against north-up map
 tiles with SuperPoint + LightGlue does not work at a reduced rate. It does not
-work at all.** Measured: **0.0%** lock on raw frames, **41.7%** once each frame
+work at all.** Measured: **0.0%** lock on raw frames, **56.7%** once each frame
 is rectified to a synthetic nadir, north-up, tile-scale view.
 
 This page gives the mechanism first, then the measurements, then what the
@@ -86,12 +86,21 @@ Reproduce with `tools/run_experiment.py`.
 
 ### SuperPoint + LightGlue (60 cycles per variant)
 
-| Variant | Lock | False fix | Error p50 | ms/cycle |
-| --- | --- | --- | --- | --- |
-| baseline (raw frames) | **0.0%** | — | — | 1828 |
-| + CLAHE only | **0.0%** | — | — | 1870 |
-| + rectify only | **41.7%** | 0.0% | 0.71 m | 2134 |
-| + rectify + CLAHE | 35.0% | 0.0% | 0.78 m | 2223 |
+| Variant | Lock | False fix | Error p50 | Inliers p50 | ms/cycle |
+| --- | --- | --- | --- | --- | --- |
+| baseline (raw frames) | **0.0%** | — | — | — | 1832 |
+| + CLAHE only | **0.0%** | — | — | — | 1880 |
+| + rectify only | **56.7%** | 0.0% | 0.58 m | 34 | 2032 |
+| + rectify + CLAHE | 53.3% | 0.0% | 0.58 m | 32 | 2086 |
+
+An earlier version of this run gave 41.7% for `+ rectify only`. The difference
+is a bug fixed in between, not noise: `build_tile_database` asked for tile
+features at full resolution by passing `resize_max_side=None`, but that could
+not mean "do not resize" (see `avinavi/features/resize.py`), so map tiles were
+being described at the live camera's smaller working size. Describing a 1024 px
+tile at 1024 px rather than 640 is worth **15 points of lock rate and ten
+inliers** — a useful reminder that the tile side of the match deserves as much
+attention as the camera side.
 
 ### SIFT + ratio test (300 cycles per variant)
 
@@ -107,7 +116,7 @@ The classical backend, kept as a measurement baseline and a no-torch fallback.
 ### Reading these
 
 **1. Rectification is categorical for the learned stack and merely helpful for
-the classical one.** 0.0% → 41.7% against 2.7% → 10.7%.
+the classical one.** 0.0% → 56.7% against 2.7% → 10.7%.
 
 That asymmetry is the strongest evidence that the mechanism above is understood
 correctly, because it is what the mechanism predicts and it is not what a
@@ -126,14 +135,21 @@ increase, since extraction already resizes.
 (0.0% → 0.0%; 2.7% → 3.3%). It only pays off once the geometry is aligned —
 where it doubles the SIFT lock rate (10.7% → 22.0%).
 
-**4. CLAHE shows no benefit for SuperPoint.** 41.7% → 35.0%, i.e. 25 fixes
-against 21 out of 60 — a difference well within sampling noise at this cycle
-count, so it should **not** be read as CLAHE being harmful. There is a plausible
-mechanism for a real effect in that direction, namely that learned descriptors
-are trained on natural image statistics and histogram equalisation moves images
-away from that distribution. But this measurement does not establish it. The
-default stays on; if you are running the SuperPoint backend and want the
-setting decided rather than inherited, measure it with several hundred cycles.
+**4. CLAHE shows no benefit for SuperPoint.** 56.7% → 53.3%, i.e. 34 fixes
+against 32 out of 60. That difference is well within sampling noise, so it must
+**not** be read as CLAHE being harmful — but it is the second independent run to
+come out that way (the earlier one gave 41.7% → 35.0%), and two runs agreeing on
+the direction is worth recording even when neither is individually significant.
+
+There is a plausible mechanism: learned descriptors are trained on natural image
+statistics, and histogram equalisation moves images away from that distribution,
+whereas SIFT's gradient-based descriptors simply benefit from the extra
+contrast. That would explain why the same setting doubles the SIFT lock rate and
+does nothing here.
+
+The default stays on, because changing it on this evidence would be
+overreaching. If you are running the SuperPoint backend and want the setting
+decided rather than inherited, measure it with several hundred cycles.
 
 **5. Zero false fixes everywhere**, and the deliberately-wrong tile attracted no
 inliers that survived verification in any variant. This matters more than the
@@ -175,9 +191,9 @@ odometry its tracking outright (`tests/test_visual_odometry.py`).
 
 ## The cost, and the open question
 
-At 2.1 s per cycle for the real stack on a CPU, matching is no longer the
-limiting factor — **time is**. A fixed wing covers 46 metres in 2.1 s, so a 41.7%
-lock rate at 0.5 Hz is a very different thing from 41.7% at 2 Hz.
+At ~2.0 s per cycle for the real stack on four CPU cores, matching is no longer
+the limiting factor — **time is**. A fixed wing covers 45 metres in 2.0 s, so a
+56.7% lock rate at 0.5 Hz is a very different thing from 56.7% at 2 Hz.
 
 Two things address this, and both are in progress:
 
