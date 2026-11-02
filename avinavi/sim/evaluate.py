@@ -95,6 +95,12 @@ class SimulationReport:
     #: decides whether ``max_candidate_tiles`` can be lowered, since that limit
     #: multiplies the dominant cost.
     candidate_ranks: List[int] = field(default_factory=list)
+    #: Length of each run of consecutive failures.  This separates two very
+    #: different situations that share a lock rate: failures scattered one at a
+    #: time (individual hard frames) and failures in long runs (the search has
+    #: lost the thread and cannot re-acquire).  Only the second is a recovery
+    #: problem, and only the second is fixed by widening the candidate list.
+    failure_runs: List[int] = field(default_factory=list)
     trajectory: Dict = field(default_factory=dict)
     settings: Dict = field(default_factory=dict)
 
@@ -189,6 +195,16 @@ class SimulationReport:
             "failure_reasons": dict(
                 sorted(self.failure_reasons.items(), key=lambda kv: -kv[1])
             ),
+            "failure_runs": {
+                "count": len(self.failure_runs),
+                "longest": max(self.failure_runs) if self.failure_runs else 0,
+                "mean": (
+                    round(sum(self.failure_runs) / len(self.failure_runs), 2)
+                    if self.failure_runs
+                    else 0
+                ),
+                "lengths": sorted(self.failure_runs, reverse=True)[:10],
+            },
             "winning_candidate_rank": {
                 str(rank): self.candidate_ranks.count(rank)
                 for rank in sorted(set(self.candidate_ranks))
@@ -498,6 +514,7 @@ def run_simulation(
     )
 
     wrong_tile = database.tiles[-1] if len(database) > 1 else None
+    current_failure_run = 0
 
     for index, (point, frame) in enumerate(frames):
         if max_cycles is not None and index >= max_cycles:
@@ -557,12 +574,16 @@ def run_simulation(
                     fix.quality.number_of_inliers,
                 )
             report.by_bank[band] = (good + 1, total + 1)
+            if current_failure_run:
+                report.failure_runs.append(current_failure_run)
+                current_failure_run = 0
         else:
             reason = (
                 fix.reason.value if isinstance(fix.reason, InvalidReason) else str(fix.reason)
             )
             report.failure_reasons[reason] = report.failure_reasons.get(reason, 0) + 1
             report.by_bank[band] = (good, total + 1)
+            current_failure_run += 1
 
         # Separation: how many inliers does the *wrong* tile attract?  Sampled
         # rather than measured every cycle, because it doubles the run time.
@@ -570,6 +591,9 @@ def run_simulation(
             report.wrong_tile_inliers.append(
                 _wrong_tile_inliers(engine, frame, wrong_tile, config)
             )
+
+    if current_failure_run:
+        report.failure_runs.append(current_failure_run)
 
     return report
 
