@@ -158,6 +158,15 @@ class VisualFix:
     # derived from the match quality; consumed when building covariances.
     position_sigma_m: float = float("nan")
     yaw_sigma_rad: float = float("nan")
+    #: True when this position came from frame-to-frame odometry carried forward
+    #: from an earlier map fix, rather than from matching this frame to the map.
+    #: It is a real estimate with an honestly grown ``position_sigma_m``, not a
+    #: repeated pose - but it is *not* independent evidence, so anything
+    #: reasoning about map agreement (the yaw-bias estimator, the tile search
+    #: window, lock-rate statistics) must exclude it.
+    dead_reckoned: bool = False
+    #: Seconds of dead reckoning accumulated since the last map fix.
+    dead_reckoning_s: float = 0.0
 
     @property
     def confidence(self) -> float:

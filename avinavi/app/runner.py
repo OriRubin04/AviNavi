@@ -34,6 +34,7 @@ import logging
 import math
 import threading
 import time
+from dataclasses import replace
 from typing import Optional, Union
 
 from ..camera import CameraError, create_camera
@@ -41,15 +42,17 @@ from ..config import Config
 from ..diagnostics.logging_setup import SolutionLogger
 from ..diagnostics.monitor import DiagnosticsMonitor
 from ..geo import LocalOrigin, haversine_distance_m
+from ..frames import CameraExtrinsics
 from ..localization.engine import LocalizationEngine
 from ..localization.propagator import PosePropagator
+from ..localization.visual_odometry import DeadReckoner, FrameToFrameOdometry
 from ..mapdb.database import MapCoverageError, MapDatabase
 from ..mavlink.connection import MavlinkConnection, MavlinkConnectionError
 from ..mavlink.external_navigation import ExternalNavigationPublisher
 from ..mavlink.gps_input import GpsInputPublisher
 from ..mavlink.initial_position import InitialPositionError, InitialPositionProvider
 from ..mavlink.reanchor import ReanchorListener, ReanchorRequest
-from ..types import GeoPoint, InvalidReason, VisualFix
+from ..types import GeoPoint, InvalidReason, NEDPosition, VisualFix
 from .safety import SafetyGate
 
 LOG = logging.getLogger(__name__)
@@ -84,6 +87,15 @@ class Runner:
         self.publisher: Optional[Publisher] = None
         self.initial_position: Optional[InitialPositionProvider] = None
         self.reanchor_listener: Optional[ReanchorListener] = None
+
+        extrinsics = CameraExtrinsics.from_config(config.camera_extrinsics)
+        self.odometry = FrameToFrameOdometry.from_config(
+            config.camera, extrinsics, config.visual_odometry
+        )
+        self.reckoner = DeadReckoner.from_config(config.visual_odometry)
+        #: The last fix that came from actually matching the map.  Dead
+        #: reckoning is always expressed as an offset from this.
+        self._last_map_fix: Optional[VisualFix] = None
 
         self._stop = threading.Event()
         self._threads = []
@@ -358,7 +370,11 @@ class Runner:
             self._last_frame_sequence = frame.sequence
 
             fix = self._localize(frame)
+            # Only a real map match counts toward the lock rate; a
+            # dead-reckoned position would otherwise flatter the statistics
+            # with its own predecessor's success.
             self.monitor.record_fix(fix)
+            fix = self._apply_dead_reckoning(fix, frame)
 
             accepted, reason = self.safety.observe(fix)
             if accepted:
@@ -379,6 +395,115 @@ class Runner:
                 LOG.info("reached the %d cycle limit", max_cycles)
                 self._frames_exhausted.set()
                 return
+
+    def _apply_dead_reckoning(self, fix: VisualFix, frame) -> VisualFix:
+        """Carry the solution across a map-matching dropout.
+
+        The frame-to-frame odometry runs on *every* cycle, successful or not,
+        because it needs consecutive frames to work from — skipping it after a
+        good fix would leave nothing to track from when the next one fails.
+
+        A dead-reckoned fix is returned as ``valid`` because it is a genuine
+        estimate, but it carries ``dead_reckoned=True`` and a sigma grown by the
+        distance flown, so everything downstream can tell the difference. It is
+        bounded twice: by ``max_dead_reckoning_s``, after which this produces
+        nothing at all, and by the safety gate, which still applies.
+        """
+        if not self.config.visual_odometry.enabled or not self.odometry.available:
+            return fix
+
+        delta = None
+        try:
+            delta = self.odometry.update(
+                frame.image,
+                timestamp_monotonic=frame.timestamp_monotonic,
+                height_m=self._height_hint(),
+                roll_rad=self._attitude()[0],
+                pitch_rad=self._attitude()[1],
+                yaw_rad=self._attitude()[2] or 0.0,
+            )
+        except Exception:
+            LOG.exception("visual odometry raised; continuing without it")
+
+        if fix.valid and fix.position_ned is not None:
+            # A map fix resets the drift: dead reckoning is always relative to
+            # the most recent real match.
+            self._last_map_fix = fix
+            sigma = fix.position_sigma_m
+            self.reckoner.start(0.0 if math.isnan(sigma) else sigma)
+            return fix
+
+        if delta is None or self._last_map_fix is None or not self.reckoner.active:
+            return fix
+        if not self.reckoner.accumulate(delta):
+            # The limit has just been passed. Say why, so the log distinguishes
+            # "could not match" from "stopped guessing".
+            self._notify(
+                "AviNavi: dead reckoning expired after %.0f m; no position"
+                % self.reckoner.distance_m,
+                warning=True,
+            )
+            return replace(fix, reason=InvalidReason.DEAD_RECKONING_EXPIRED)
+
+        return self._dead_reckoned_fix(fix)
+
+    def _dead_reckoned_fix(self, failed: VisualFix) -> VisualFix:
+        """Build a position from the last map fix plus the accumulated offset."""
+        base = self._last_map_fix
+        origin = self.engine.origin
+        if base is None or base.position_ned is None or origin is None:
+            return failed
+
+        north_offset, east_offset = self.reckoner.offset_ned_m
+        position = NEDPosition(
+            base.position_ned.north_m + north_offset,
+            base.position_ned.east_m + east_offset,
+            base.position_ned.down_m,
+        )
+        sigma = self.reckoner.sigma_m
+        return VisualFix(
+            timestamp_monotonic=failed.timestamp_monotonic,
+            timestamp_unix=failed.timestamp_unix,
+            valid=True,
+            reason=InvalidReason.NONE,
+            geo=origin.to_geo(position),
+            position_ned=position,
+            velocity_ned=base.velocity_ned,
+            attitude=base.attitude,
+            # Yaw is not observed by dead reckoning; carrying the old one
+            # forward would misrepresent it as fresh.
+            yaw_rad=None,
+            quality=base.quality,
+            tile_id=base.tile_id,
+            candidate_tiles=0,
+            ground_resolution_mpp=base.ground_resolution_mpp,
+            processing_time_s=failed.processing_time_s,
+            position_sigma_m=sigma,
+            yaw_sigma_rad=base.yaw_sigma_rad,
+            dead_reckoned=True,
+            dead_reckoning_s=self.reckoner.elapsed_s,
+        )
+
+    def _attitude(self):
+        """``(roll, pitch, yaw)`` from the autopilot, or level flight."""
+        if self.connection is None:
+            return (0.0, 0.0, None)
+        state = self.connection.state
+        if state.attitude_age() < 0.5 and state.roll_rad is not None:
+            return (state.roll_rad, state.pitch_rad, state.yaw_rad)
+        return (0.0, 0.0, None)
+
+    def _height_hint(self) -> Optional[float]:
+        """Height above the mapped terrain, from the autopilot where fresh."""
+        if self.connection is None:
+            return None
+        state = self.connection.state
+        if state.height_age() >= 1.0 or state.height_above_origin_m is None:
+            return None
+        origin = self.engine.origin
+        if origin is None:
+            return None
+        return origin.alt_m + state.height_above_origin_m - self.config.map.terrain_alt_m
 
     def _apply_pending_reanchor(self) -> None:
         """Move the search window if the operator clicked the map.
@@ -416,28 +541,16 @@ class Runner:
         )
 
     def _localize(self, frame) -> VisualFix:
-        """Run one cycle, feeding in autopilot attitude/height when available."""
-        roll = pitch = 0.0
-        yaw = None
-        height_hint = None
-        if self.connection is not None:
-            state = self.connection.state
-            # Only trust attitude that is actually fresh; stale angles are worse
-            # than assuming level flight.
-            if state.attitude_age() < 0.5 and state.roll_rad is not None:
-                roll = state.roll_rad
-                pitch = state.pitch_rad
-                # Yaw is passed separately: it steers the north-up rectification
-                # and seeds the yaw-bias estimator, but unlike roll and pitch
-                # there is no safe default, so None means "do not assume".
-                yaw = state.yaw_rad
-            if state.height_age() < 1.0 and state.height_above_origin_m is not None:
-                origin = self.engine.origin
-                terrain = self.config.map.terrain_alt_m
-                if origin is not None:
-                    height_hint = (
-                        origin.alt_m + state.height_above_origin_m - terrain
-                    )
+        """Run one cycle, feeding in autopilot attitude/height when available.
+
+        Only attitude that is actually fresh is used; stale angles are worse
+        than assuming level flight. Yaw is passed separately from roll and
+        pitch because it steers the north-up rectification and seeds the
+        yaw-bias estimator, and unlike the other two there is no safe default,
+        so ``None`` means "do not assume".
+        """
+        roll, pitch, yaw = self._attitude()
+        height_hint = self._height_hint()
 
         try:
             return self.engine.localize(
