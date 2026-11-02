@@ -139,6 +139,66 @@ avinavi map-info map_database
 Reports tile count, coverage bounding box, the range of ground resolutions, and
 any tiles missing features (exit code 1 if there are any).
 
+It also scores each tile for **localizability**: whether the imagery can support
+a match at all. This reads every tile's features, so it is the slow part of the
+command; `--no-localizability` skips it.
+
+## Ground that cannot be matched
+
+Some terrain cannot be localized against, and it is much cheaper to find out
+before the flight than during one. Two opposite failure modes:
+
+**Nothing to detect.** Open water, snow, desert sand, dense uniform forest
+canopy. Few keypoints, and the ones that exist come from sensor noise. The
+system fails safe here — no match, no position, and the dead reckoning carries
+on until it expires.
+
+**Too much of the same thing.** Orchards, vineyards, ploughed fields, solar
+farms, large car parks. This is the dangerous one, and it does **not** fail
+safe. There are plenty of keypoints and they are all confusable, so a matcher
+can lock onto the ground one row of trees away and the geometry is still
+perfectly consistent — RANSAC confirms it, the confidence score is high, and the
+reported position is wrong by exactly one period. The EKF has no way to reject
+that.
+
+`map-info` reports three components per tile:
+
+| Component | Question it answers |
+| --- | --- |
+| `density` | Is there anything here at all? |
+| `distinctiveness` | Or is it the same thing repeated? |
+| `spread` | Does it work anywhere over the tile, or only in one corner? |
+
+They combine into `score` in [0, 1] as a weighted **geometric** mean, so a tile
+that fails badly on any one of them scores badly overall — an arithmetic mean
+would let a high keypoint density mask zero distinctiveness, which is precisely
+the orchard case.
+
+Tiles flagged `"repetitive": true` get their own stderr warning, because
+"poor" undersells them: the failure is a confident wrong position rather than a
+missing one. If your route must cross such ground, raise
+`geometry.min_inlier_ratio` and `confidence.min_confidence` — and treat the
+dead-reckoning path as the primary source over that stretch rather than the map.
+
+Measured behaviour, on real SIFT features:
+
+| Scene | `distinctiveness` | `score` | Verdict |
+| --- | --- | --- | --- |
+| mixed terrain | 0.95 | 0.98 | good |
+| orchard with varying tree size, tone and spacing | 0.08 | 0.32 | poor, flagged repetitive |
+| lattice of identical blobs | 0.00 | 0.00 | unusable, flagged repetitive |
+| near-featureless water | — (no keypoints) | 0.00 | unusable |
+
+**Two honest limits.** The score is computed per *region* within a tile rather
+than averaged over it, which matters — an orchard stamped over textured terrain
+moves the tile-wide figure only from 0.89 to 0.78 because the surrounding
+texture keeps supplying good keypoints, while the region-wise measure separates
+the same tiles across 0.60 to 0.92. Even so, a large tile averages over
+heterogeneous ground, so **smaller tiles give a finer-grained warning**. And
+whether the score ranks tiles in the order they *actually* localize has not yet
+been measured against flight or simulation outcomes; a low score is a reliable
+warning about the imagery, but a high score is not a promise.
+
 ## Choosing tile size and overlap
 
 **Overlap matters more than it looks.** A live frame that straddles a tile
