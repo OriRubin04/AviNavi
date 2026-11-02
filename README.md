@@ -77,6 +77,7 @@ effect.
 | [docs/matching-robustness.md](docs/matching-robustness.md) | Why frames are rectified before matching, and what it measures |
 | [docs/usb-camera.md](docs/usb-camera.md) | The three USB camera settings that fail silently on a Pi |
 | [docs/manual-reanchor.md](docs/manual-reanchor.md) | Clicking the map to say where to resume searching |
+| [docs/performance.md](docs/performance.md) | Measured latency, the speed/accuracy sweep, and why 2 Hz is not reachable yet |
 
 ## Installation
 
@@ -301,14 +302,32 @@ an NPU-accelerated extractor additions rather than rewrites.
 
 ## Status and known limits
 
-This is a complete, working implementation of the architecture, with the maths
-verified against synthetic ground truth and the MAVLink encoding verified
-against ArduPilot's own receiving code. It has **not** been flown. Before it is:
+This is a complete implementation of the architecture, with the maths verified
+against synthetic ground truth, the MAVLink encoding verified against
+ArduPilot's own receiving code, and the matching behaviour measured in
+simulation rather than asserted. It has **not** been flown.
 
-- Calibrate the camera and fill in `camera.fx/fy/cx/cy`.
-- Measure `VISO_DELAY_MS` for your hardware rather than accepting the default.
-- Benchmark the Pi and set `rates.visual_localization_hz` from the *worst-case*
-  latency, not the mean.
+**The one thing to know before planning anything around it:** the real
+SuperPoint + LightGlue stack runs at roughly **0.4 Hz on four CPU cores**, not
+the 2 Hz the configuration assumes, and no tested configuration reaches 2 Hz.
+Matching is not the limiting factor any more — time is. See
+[docs/performance.md](docs/performance.md) for the sweep and the four ways
+forward. The classical backend (`features.backend: opencv`) runs the same
+pipeline sixty times faster for half the lock rate, which is a reasonable
+choice for a first flight.
+
+Before flying:
+
+- Calibrate the camera and fill in `camera.fx/fy/cx/cy`. Rectification does not
+  work without them, and rectification is not optional on a fixed wing.
+- Verify the mounting `yaw_deg` against a real frame — a 90° error is a yaw bias
+  the EKF fights rather than rejects.
+- Check `avinavi map-info` for tiles flagged `repetitive`, and plan a route that
+  does not depend on them.
+- Confirm your board can accept a visual position at all
+  ([docs/flight-controller-compatibility.md](docs/flight-controller-compatibility.md)).
+- Measure the per-cycle latency on your own Pi and set
+  `rates.visual_localization_hz` from the **p95**, not the mean.
 - Work through [docs/safety-and-testing.md](docs/safety-and-testing.md) in order.
 
 Modelling limits worth knowing:

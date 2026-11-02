@@ -134,32 +134,45 @@ Displacement accuracy against simulated ground truth is within 0.25 m over a
 
 ## 3. Resume here — ordered
 
-### 3.1 The Pi time budget (this is now the blocking item)
+### 3.1 The Pi time budget (measured; this is the blocking item)
 
-**SuperPoint + LightGlue took ~3.2 s per cycle** in this container (60 cycles in
-144–194 s, matching against up to 4 candidate tiles). That is 0.3 Hz, against
-the 2.0 Hz `rates.visual_localization_hz` assumes, and a Pi 5 will not be
-faster than this x86 container.
+**Done: the sweep is in `docs/performance.md`.** The finding is that
+SuperPoint + LightGlue runs at ~0.4 Hz on four cores and **no tested
+configuration reaches 2 Hz**. The architecture is confirmed; the configuration
+is not yet flyable.
 
-So the architecture is confirmed and the *configuration* is not yet flyable.
-What to measure, in order:
+What the sweep established:
 
-1. **Where the time actually goes.** Split extraction from matching, and matching
-   from the candidate-tile loop. `lightglue.max_candidate_tiles` is 4 by
-   default, so a cycle may be running LightGlue four times — and a tighter
-   search window would cut that directly. This is the cheapest likely win and
-   should be measured before anything is optimised.
-2. **The speed/accuracy curve** over `superpoint.resize_max_side` (640 now),
-   `superpoint.max_num_keypoints` (1024) and `max_candidate_tiles`. The useful
-   deliverable is "highest lock rate that fits a 2 Hz budget", not either
-   extreme. `tools/run_experiment.py` already shares one basemap and frame set
-   across variants, so this is a sweep, not new code.
-3. **ONNX Runtime** (~2.4× reported) and **XFeat + LighterGlue** (4–8× faster
-   for ~5% relative AUC) as the speed path. **Do not pursue a Hailo NPU** —
-   LightGlue's dynamic keypoint count and data-dependent early exit are
-   incompatible with its static dataflow compiler.
-4. Then set `rates.visual_localization_hz` from the *worst-case* measured
-   latency, not the mean, and let the visual odometry cover the gap.
+- `max_candidate_tiles` is the only real time lever (4 → 1 cuts 2438 → 1476 ms)
+  and it costs half the lock rate (45% → 20%). LightGlue runs once per
+  candidate, so this multiplies the dominant cost — and the lock rate falling
+  that hard means the search window is not precise enough to put the right tile
+  first.
+- `resize_max_side` 640 → 384 changes **neither** lock rate nor latency.
+  Extraction is not the bottleneck; matching is.
+- `max_num_keypoints` 1024 → 512 is nearly free (45.0% → 42.5%, better median
+  error); 512 → 256 collapses to 2.5%. A cliff, not a slope.
+
+So the remaining work, in value order:
+
+1. **Tighten the search window** so fewer candidate tiles are needed. This is
+   the one change that buys time *and* hit rate together, and the sweep points
+   straight at it. The frame-to-frame odometry narrowing the window between map
+   fixes is the mechanism; it is implemented and wired but the window still
+   comes from `tile_search.search_radius_m` alone.
+2. **ONNX Runtime** (~2.4× reported) — best effort-to-benefit ratio available,
+   untried here.
+3. **XFeat + LighterGlue** (4–8× faster for ~5% relative AUC) would put 2 Hz in
+   reach; larger change, needs its own A/B.
+4. Set `rates.visual_localization_hz` from the measured **p95**.
+
+**Do not pursue a Hailo NPU** — LightGlue's dynamic keypoint count and
+data-dependent early exit are incompatible with its static dataflow compiler.
+
+A caution the sweep itself demonstrated: **run it with nothing else on the
+machine.** Several p95 figures in the first run (6456, 4681, 12545 ms) are
+inconsistent with their own means because I was running tests on the same four
+cores at the time. Lock rates are unaffected; timings are not.
 
 ### 3.2 Fix the harness weaknesses §2.2 exposed
 
@@ -172,18 +185,26 @@ What to measure, in order:
 
 ### 3.3 Remaining work, in value order
 
-- **Wire the odometry into the runner.** `FrameToFrameOdometry` and
-  `DeadReckoner` exist and are tested, but `avinavi/app/runner.py` does not
-  construct them yet, so nothing uses them in flight. This is the largest
-  remaining gap between the code and the design.
-- **Tile localizability score, offline.** A structure score from the basemap
-  tile alone predicted localizability at AUC 0.852 — better than post-match
-  inlier count. This would let `avinavi map-info` warn which areas will not work
-  *before* flying. High value for the money.
+- **Validate the localizability score against outcomes.** The score exists and
+  its repetition measure is shown to separate repetitive from varied ground on
+  real features. What is *not* shown is that `score` ranks tiles in the order
+  they actually localize. Doing it needs per-tile lock rates, which
+  `SimulationReport` does not record — add a `by_tile` counter and correlate.
+  Until then the module docstring says plainly what is and is not established.
 - **Mission Planner plugin** (`tools/mission_planner_plugin/`) is written but
   **never compiled or run**. It needs a Windows machine with Mission Planner.
-- **Tests** for `opencv_backend` and the simulator itself.
-- `docs/matching-robustness.md` — the §1.2 evidence plus the §2 tables.
+- **Tests for the simulator itself.** Everything else now has them, and the
+  simulator is what every measurement rests on — which is precisely why its
+  two bugs (§5) were so expensive.
+- **A per-stage timing breakdown.** `docs/performance.md` establishes that
+  matching dominates, but not how the time splits between rectification,
+  extraction and each candidate tile's LightGlue call. Worth having before
+  optimising anything.
+
+Done since this plan was written: the odometry is wired into the runner
+(§5 note: with its own tests), the localizability score is in `map-info`,
+`docs/matching-robustness.md`, `docs/performance.md`, `docs/usb-camera.md` and
+`docs/manual-reanchor.md` are written, and `opencv_backend` has tests.
 
 ---
 
@@ -216,7 +237,7 @@ What to measure, in order:
 
 ---
 
-## 5. Two bugs worth remembering, both of the same shape
+## 5. Three bugs worth remembering, all of the same shape
 
 Both produced a *confident, plausible, consistently wrong* answer with no error
 anywhere. That is the failure mode this whole project is built to refuse, and
@@ -234,3 +255,17 @@ trusting that a passing run meant a correct one.
    requested with `--backend superpoint` silently measured SIFT. The giveaway
    was the two backends agreeing to within 0.3% — which should have been
    suspicious immediately, and was not.
+
+3. **`resize_max_side=None` could not mean "do not resize".** With
+   `value if value is not None else self.value`, passing `None` to mean *full
+   resolution* collapsed into *use the configured resize*, so
+   `build_tile_database` — which passes `None` precisely because a 1024 px tile
+   should be described at full resolution — had its tiles quietly downscaled to
+   the live camera's working size. Fixed with an explicit sentinel
+   (`avinavi/features/resize.py`), and found by a test that asserted the
+   override worked. It did not.
+
+The pattern across all three: **a passing run is not a correct one.** Each was
+caught by checking a number against arithmetic, or by asserting that a knob did
+what its name said — never by the code failing. Anything in this codebase that
+reports a measurement deserves the same suspicion.
