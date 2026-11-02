@@ -205,6 +205,35 @@ def test_a_climb_between_frames_does_not_become_translation(world):
     assert delta.distance_m == pytest.approx(0.0, abs=1.0)
 
 
+def test_tracking_survives_a_half_second_gap_and_fails_at_a_full_one(world):
+    """The measurement that forces the odometry onto its own thread.
+
+    Lucas-Kanade needs consecutive frames to overlap heavily. At 22 m/s with a
+    139 m frame footprint, a 0.5 s gap is 11 m and 92% overlap, which tracks
+    well; a 1.0 s gap is 22 m and 84% overlap, which does not track at all.
+
+    That matters because map matching with the learned backend runs at well
+    under 1 Hz, so tracking between *localization* frames would produce
+    nothing — the dead reckoning would be present and inert exactly when
+    needed. ``rates.visual_odometry_hz`` exists for this reason and must not be
+    tied to ``visual_localization_hz``.
+
+    If this test ever starts passing at 1.0 s, the tracker has improved and the
+    rate guidance in the config comment should be revisited. If it starts
+    failing at 0.5 s, the default rate is no longer sufficient.
+    """
+    close = fly(world, point(0.0, 0.0), point(11.0, 0.0), dt_s=0.5)
+    assert close is not None, "0.5 s / 11 m must still track"
+    assert close.north_m == pytest.approx(11.0, abs=0.5)
+
+    far = fly(world, point(0.0, 0.0), point(22.0, 0.0), dt_s=1.0)
+    assert far is None, (
+        "1.0 s / 22 m produced an estimate; the tracker has improved, so the "
+        "visual_odometry_hz guidance can be relaxed - but check the estimate "
+        "is actually correct before doing so"
+    )
+
+
 def test_auto_exposure_hunting_costs_the_odometry_its_tracking(terrain):
     """Why ``camera.lock_exposure`` is on by default, measured rather than asserted.
 
@@ -287,6 +316,51 @@ def test_an_impossible_speed_is_rejected(world):
     # 400 m/s. Either tracking fails outright or the speed check rejects it;
     # what must not happen is a confident 400 m/s displacement.
     assert delta is None or delta.speed_mps <= 60.0
+
+
+def test_points_that_disagree_with_each_other_are_rejected(world):
+    """The gate that stops a confident wrong displacement.
+
+    Found by the gap test above. At a 1 s frame spacing the tracker returned
+    7.4 m for a true 22 m, from 23 points — enough to pass the count check —
+    that disagreed among themselves by 14.7 m. The count was checked and the
+    agreement was not, so a wrong number came out looking like an estimate.
+
+    Dead reckoning on that would walk the solution away from the aircraft at a
+    third of its true speed, which is the exact failure shape this project
+    exists to refuse.
+    """
+    simulator, settings, extrinsics = world
+    tracker = odometry(settings, extrinsics)
+    tracker.max_residual_m = 1.0
+    tracker.max_residual_fraction = 0.25
+
+    tracker.update(simulator.render(point(0.0, 0.0)), 0.0, HEIGHT_M)
+    delta = tracker.update(simulator.render(point(22.0, 0.0)), 1.0, HEIGHT_M)
+    assert delta is None
+
+    # With the gate disabled, the bad estimate comes through — which is what
+    # makes this a gate rather than a coincidence.
+    tracker.reset()
+    tracker.max_residual_m = 1e9
+    tracker.max_residual_fraction = 1e9
+    tracker.update(simulator.render(point(0.0, 0.0)), 0.0, HEIGHT_M)
+    ungated = tracker.update(simulator.render(point(22.0, 0.0)), 1.0, HEIGHT_M)
+    assert ungated is not None
+    assert abs(ungated.north_m - 22.0) > 5.0, (
+        "the ungated estimate is accurate, so this test is no longer "
+        "demonstrating the failure it was written for"
+    )
+
+
+def test_a_small_true_displacement_is_not_rejected_by_the_absolute_floor(world):
+    """A stationary camera has a tiny displacement and a tiny residual.
+
+    Without the absolute floor, the fractional gate would reject it: 25% of
+    almost nothing is almost nothing.
+    """
+    delta = fly(world, point(0.0, 0.0), point(0.0, 0.0))
+    assert delta is not None
 
 
 def test_a_non_advancing_timestamp_is_rejected(world):

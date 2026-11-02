@@ -309,6 +309,14 @@ class RatesConfig:
     """The two conceptual rates plus the camera capture rate."""
 
     camera_fps: float = 30.0
+    #: Frame-to-frame odometry rate.  This is **not** a performance knob and
+    #: must not be tied to ``visual_localization_hz``: Lucas-Kanade tracking
+    #: needs consecutive frames to overlap heavily, and measurement shows it
+    #: succeeds at a 0.5 s spacing (11 m at 22 m/s, 92% overlap) and fails
+    #: outright at 1.0 s (22 m, 84% overlap).  Since map matching runs at well
+    #: under 1 Hz with the learned backend, the odometry has to run on its own
+    #: schedule or it produces nothing exactly when it is needed.
+    visual_odometry_hz: float = 5.0
     visual_localization_hz: float = 5.0
     mavlink_odometry_hz: float = 20.0
     diagnostics_hz: float = 1.0

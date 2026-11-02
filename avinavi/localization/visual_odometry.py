@@ -114,6 +114,17 @@ class FrameToFrameOdometry:
         #: Refuse an estimate implying a speed above this; a fixed wing does not
         #: teleport, and a flow field that says it did is a tracking failure.
         max_speed_mps: float = 60.0,
+        #: Refuse an estimate whose surviving points disagree with each other by
+        #: more than this fraction of the displacement they claim.  **This gate
+        #: is what stops the module producing a confident wrong answer**, which
+        #: it otherwise does as soon as frames are spaced too far apart: at a
+        #: 1 s gap it returned 7.4 m for a true 22 m, from 23 points that
+        #: disagreed among themselves by 14.7 m.  Enough points survived to pass
+        #: the count check, and nothing else looked at whether they agreed.
+        max_residual_fraction: float = 0.25,
+        #: Absolute floor on the above, so a small true displacement is not
+        #: rejected for a residual that is small in absolute terms.
+        max_residual_m: float = 1.0,
     ) -> None:
         self.extrinsics = extrinsics
         self.fx = fx
@@ -125,6 +136,8 @@ class FrameToFrameOdometry:
         self.resize_max_side = int(resize_max_side)
         self.outlier_mads = float(outlier_mads)
         self.max_speed_mps = float(max_speed_mps)
+        self.max_residual_fraction = float(max_residual_fraction)
+        self.max_residual_m = float(max_residual_m)
 
         self._previous_gray = None
         self._previous_points = None
@@ -348,6 +361,27 @@ class FrameToFrameOdometry:
                 "tracking failure rather than believing it",
                 delta.speed_mps,
                 dt_s * 1000.0,
+            )
+            return None
+
+        # Do the surviving points actually agree with one another? Enough of
+        # them can pass the count check while disagreeing wildly, and the mean
+        # of a disagreeing set is not an estimate - it is a number. This is the
+        # gate that turns "tracking failed" from a confident wrong displacement
+        # into no displacement.
+        tolerance = max(
+            self.max_residual_m, self.max_residual_fraction * delta.distance_m
+        )
+        if residual > tolerance:
+            LOG.warning(
+                "visual odometry rejected: %d points claim %.1f m but disagree "
+                "among themselves by %.1f m (limit %.1f m). Frames are probably "
+                "spaced too far apart for the tracker - at 22 m/s it needs "
+                "better than about 0.5 s between frames.",
+                delta.tracked_points,
+                delta.distance_m,
+                residual,
+                tolerance,
             )
             return None
         return delta

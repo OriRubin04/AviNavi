@@ -112,6 +112,13 @@ rates:
   # resize_max_side 640. Benchmark with `avinavi bench` before raising it; a
   # requested rate the Pi cannot meet silently becomes a lower actual rate.
   visual_localization_hz: 2.0
+  # Frame-to-frame odometry. NOT tied to visual_localization_hz, and not a
+  # performance knob: Lucas-Kanade needs consecutive frames to overlap, and it
+  # was measured to track at a 0.5 s spacing (11 m at 22 m/s, 92% overlap) and
+  # to fail outright at 1.0 s (22 m, 84% overlap). Map matching with the
+  # learned backend runs at well under 1 Hz, so tracking between localization
+  # frames would produce nothing at all. See docs/performance.md.
+  visual_odometry_hz: 5.0
   mavlink_odometry_hz: 20.0
   diagnostics_hz: 1.0
 

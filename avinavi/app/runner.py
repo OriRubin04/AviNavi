@@ -96,6 +96,14 @@ class Runner:
         #: The last fix that came from actually matching the map.  Dead
         #: reckoning is always expressed as an offset from this.
         self._last_map_fix: Optional[VisualFix] = None
+        #: The odometry thread accumulates into the reckoner while the
+        #: localization thread starts and reads it, so it needs a lock.
+        self._reckoner_lock = threading.Lock()
+        self._reckoning_just_expired = False
+        #: True when odometry runs on its own thread.  False for a replay
+        #: source, where the localization loop must do the tracking instead -
+        #: see :meth:`_odometry_loop`.
+        self._odometry_threaded = False
 
         self._stop = threading.Event()
         self._threads = []
@@ -271,6 +279,13 @@ class Runner:
                 daemon=True,
             )
         ]
+        if self._should_thread_odometry():
+            self._odometry_threaded = True
+            self._threads.append(
+                threading.Thread(
+                    target=self._odometry_loop, name="odometry", daemon=True
+                )
+            )
         if self.uses_mavlink:
             self._threads.append(
                 threading.Thread(target=self._output_loop, name="output", daemon=True)
@@ -396,12 +411,114 @@ class Runner:
                 self._frames_exhausted.set()
                 return
 
-    def _apply_dead_reckoning(self, fix: VisualFix, frame) -> VisualFix:
+    def _should_thread_odometry(self) -> bool:
+        """Does the odometry get its own thread?
+
+        Not for a ``directory`` replay source. Two threads pulling from one
+        replay would consume images twice and desynchronise the run, and it is
+        unnecessary there anyway: consecutive images in a directory *are*
+        consecutive frames, so tracking inside the localization loop is both
+        safe and correct.
+        """
+        if not self.config.visual_odometry.enabled or not self.odometry.available:
+            return False
+        if (self.config.camera.source or "").lower() == "directory":
+            return False
+        return self.config.rates.visual_odometry_hz > 0
+
+    def _odometry_loop(self) -> None:
+        """Track the ground between map fixes, on its own schedule.
+
+        This runs far faster than the localization loop, and that is the whole
+        point — see :meth:`track_frame`. It reads the camera concurrently with
+        the localization loop, which is safe for a live source because the
+        capture thread always hands over the newest frame; both consumers
+        occasionally seeing the same frame is harmless, and a repeated frame
+        yields a zero delta rather than a wrong one.
+        """
+        interval = 1.0 / self.config.rates.visual_odometry_hz
+        next_cycle = time.monotonic()
+        failures = 0
+
+        while not self._stop.is_set():
+            now = time.monotonic()
+            if now < next_cycle:
+                self._stop.wait(min(next_cycle - now, 0.02))
+                continue
+            next_cycle = max(next_cycle + interval, now + interval * 0.25)
+
+            if self.camera is None:
+                return
+            try:
+                frame = self.camera.read()
+            except CameraError:
+                # The localization loop reports camera faults and shuts the run
+                # down; this thread just stops contributing.
+                return
+            if frame is None:
+                continue
+
+            if not self.track_frame(frame):
+                failures += 1
+                if failures == 40:
+                    LOG.warning(
+                        "frame-to-frame odometry has produced no estimate for "
+                        "%d consecutive frames. Dead reckoning cannot cover a "
+                        "map dropout in this state - check the height source, "
+                        "and that rates.visual_odometry_hz is high enough that "
+                        "consecutive frames still overlap.",
+                        failures,
+                    )
+            else:
+                failures = 0
+
+    def track_frame(self, frame) -> bool:
+        """Feed one frame to the frame-to-frame odometry.
+
+        Called from :meth:`_odometry_loop` at ``rates.visual_odometry_hz``,
+        which is **deliberately not** the localization rate. Lucas-Kanade needs
+        consecutive frames to overlap heavily, and it was measured to succeed at
+        a 0.5 s spacing (11 m at 22 m/s, 92% frame overlap) and to fail outright
+        at 1.0 s (22 m, 84% overlap). Since map matching runs at well under 1 Hz
+        with the learned backend, tracking between *localization* frames would
+        produce nothing at all — the feature would be present and inert exactly
+        when it is needed.
+
+        Returns True when a delta was accumulated.
+        """
+        if not self.config.visual_odometry.enabled or not self.odometry.available:
+            return False
+
+        roll, pitch, yaw = self._attitude()
+        try:
+            delta = self.odometry.update(
+                frame.image,
+                timestamp_monotonic=frame.timestamp_monotonic,
+                height_m=self._height_hint(),
+                roll_rad=roll,
+                pitch_rad=pitch,
+                yaw_rad=yaw or 0.0,
+            )
+        except Exception:
+            LOG.exception("visual odometry raised; continuing without it")
+            return False
+        if delta is None:
+            return False
+
+        with self._reckoner_lock:
+            if not self.reckoner.active:
+                # Nothing to reckon from yet, or it has already expired.
+                return False
+            if not self.reckoner.accumulate(delta):
+                self._reckoning_just_expired = True
+                return False
+        return True
+
+    def _apply_dead_reckoning(self, fix: VisualFix, frame=None) -> VisualFix:
         """Carry the solution across a map-matching dropout.
 
-        The frame-to-frame odometry runs on *every* cycle, successful or not,
-        because it needs consecutive frames to work from — skipping it after a
-        good fix would leave nothing to track from when the next one fails.
+        Consumes whatever :meth:`track_frame` has accumulated since the last map
+        fix; it does not run the odometry itself.
 
         A dead-reckoned fix is returned as ``valid`` because it is a genuine
         estimate, but it carries ``dead_reckoned=True`` and a sigma grown by the
@@ -412,32 +529,28 @@ class Runner:
         if not self.config.visual_odometry.enabled or not self.odometry.available:
             return fix
 
-        delta = None
-        try:
-            delta = self.odometry.update(
-                frame.image,
-                timestamp_monotonic=frame.timestamp_monotonic,
-                height_m=self._height_hint(),
-                roll_rad=self._attitude()[0],
-                pitch_rad=self._attitude()[1],
-                yaw_rad=self._attitude()[2] or 0.0,
-            )
-        except Exception:
-            LOG.exception("visual odometry raised; continuing without it")
+        # In replay mode there is no separate odometry thread - see
+        # _odometry_loop - so the localization loop does the tracking, which is
+        # correct there because consecutive images in a directory *are*
+        # consecutive frames.
+        if frame is not None and not self._odometry_threaded:
+            self.track_frame(frame)
 
         if fix.valid and fix.position_ned is not None:
             # A map fix resets the drift: dead reckoning is always relative to
             # the most recent real match.
             self._last_map_fix = fix
             sigma = fix.position_sigma_m
-            self.reckoner.start(0.0 if math.isnan(sigma) else sigma)
+            with self._reckoner_lock:
+                self.reckoner.start(0.0 if math.isnan(sigma) else sigma)
+                self._reckoning_just_expired = False
             return fix
 
-        if delta is None or self._last_map_fix is None or not self.reckoner.active:
-            return fix
-        if not self.reckoner.accumulate(delta):
-            # The limit has just been passed. Say why, so the log distinguishes
-            # "could not match" from "stopped guessing".
+        if self._reckoning_just_expired:
+            # Say why once, so the log distinguishes "could not match" from
+            # "stopped guessing"; afterwards the honest reason is whatever the
+            # map matching reported.
+            self._reckoning_just_expired = False
             self._notify(
                 "AviNavi: dead reckoning expired after %.0f m; no position"
                 % self.reckoner.distance_m,
@@ -445,6 +558,13 @@ class Runner:
             )
             return replace(fix, reason=InvalidReason.DEAD_RECKONING_EXPIRED)
 
+        with self._reckoner_lock:
+            if self._last_map_fix is None or not self.reckoner.active:
+                return fix
+            if self.reckoner.distance_m <= 0.0:
+                # Reckoning is live but the odometry has not produced anything
+                # yet: no information, which is not the same as no movement.
+                return fix
         return self._dead_reckoned_fix(fix)
 
     def _dead_reckoned_fix(self, failed: VisualFix) -> VisualFix:

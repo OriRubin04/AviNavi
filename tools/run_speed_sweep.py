@@ -97,8 +97,8 @@ def main() -> int:
         "\n=== speed/accuracy sweep (%s backend, budget %.0f ms/cycle) ===\n"
         % (args.backend, args.budget_s * 1000.0)
     )
-    header = "%-30s %7s %8s %9s %9s %8s %7s" % (
-        "setting", "lock", "false", "err p50", "ms mean", "ms p95", "fits?"
+    header = "%-30s %7s %8s %9s %9s %8s %8s %7s" % (
+        "setting", "lock", "false", "err p50", "ms mean", "ms p95", "fix/s", "fits?"
     )
     print(header)
     print("-" * len(header))
@@ -128,8 +128,16 @@ def main() -> int:
         # Judge on p95, not the mean: the rate has to be set from the worst
         # case or the loop silently falls behind in exactly the hard frames.
         fits = "yes" if p95_ms <= args.budget_s * 1000.0 else "no"
+        # Map fixes per second of flight: the figure that actually matters.
+        # Lock rate alone is misleading when cycle times differ by 50%, because
+        # a configuration that locks half as often but runs twice as fast
+        # delivers the same number of fixes - and the gaps between them, not the
+        # ratio, are what the dead reckoning has to cover.
+        fixes_per_second = (
+            report.lock_rate / (mean_ms / 1000.0) if mean_ms > 0 else 0.0
+        )
         print(
-            "%-30s %6.1f%% %7.1f%% %9s %9.0f %8.0f %7s"
+            "%-30s %6.1f%% %7.1f%% %9s %9.0f %8.0f %8.3f %7s"
             % (
                 label,
                 100.0 * report.lock_rate,
@@ -139,6 +147,7 @@ def main() -> int:
                 else "-",
                 mean_ms,
                 p95_ms,
+                fixes_per_second,
                 fits,
             ),
             flush=True,
@@ -150,9 +159,26 @@ def main() -> int:
                 "resize_max_side": resize,
                 "max_num_keypoints": keypoints,
                 "fits_budget": fits == "yes",
+                "fixes_per_second": round(fixes_per_second, 4),
+                "metres_between_fixes_at_22mps": (
+                    round(22.0 / fixes_per_second, 1) if fixes_per_second > 0 else None
+                ),
                 "wall_time_s": round(time.time() - started, 1),
                 **data,
             }
+        )
+
+    # Rank by fixes per second, which is what the navigation solution lives on.
+    print("\n--- by map fixes per second of flight (22 m/s) ---")
+    for row in sorted(reports, key=lambda r: -r["fixes_per_second"]):
+        gap = row["metres_between_fixes_at_22mps"]
+        print(
+            "  %-30s %5.3f fix/s  one fix every %s"
+            % (
+                row["label"],
+                row["fixes_per_second"],
+                "%.0f m" % gap if gap is not None else "never",
+            )
         )
 
     affordable = [r for r in reports if r["fits_budget"]]

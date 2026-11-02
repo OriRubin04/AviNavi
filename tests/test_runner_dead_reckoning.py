@@ -318,6 +318,85 @@ def test_nothing_is_produced_without_an_origin(runner):
 
 
 # ---------------------------------------------------------------------------
+# The odometry runs on its own schedule
+# ---------------------------------------------------------------------------
+def test_the_odometry_gets_its_own_thread_for_a_live_camera(runner):
+    """Because map matching is far too slow to track between its own frames.
+
+    Measured: tracking succeeds at a 0.5 s frame gap and fails at 1.0 s, while
+    the learned backend takes ~2 s per localization cycle. Tracking between
+    localization frames would produce nothing at all.
+    """
+    runner.config.camera.source = "opencv"
+    assert runner._should_thread_odometry() is True
+
+
+def test_a_replay_source_tracks_in_the_localization_loop_instead(runner):
+    """Two threads pulling one replay would consume images twice.
+
+    And it is unnecessary there: consecutive images in a directory *are*
+    consecutive frames, so in-loop tracking is both safe and correct.
+    """
+    runner.config.camera.source = "directory"
+    assert runner._should_thread_odometry() is False
+
+
+def test_no_odometry_thread_when_the_feature_is_off(runner):
+    runner.config.camera.source = "opencv"
+    runner.config.visual_odometry.enabled = False
+    assert runner._should_thread_odometry() is False
+
+
+def test_no_odometry_thread_without_intrinsics(origin):
+    config = Config()
+    config.camera.source = "opencv"
+    config.visual_odometry.enabled = True
+    runner = Runner(config)      # no camera.fx / fy
+    assert runner._should_thread_odometry() is False
+
+
+def test_track_frame_accumulates_only_while_reckoning_is_live(runner):
+    """Before a map fix there is nothing to reckon from, so deltas are dropped.
+
+    Keeping them would mean the first dead-reckoned position carried an offset
+    accumulated before the fix it is supposed to be relative to.
+    """
+    runner.odometry.delta = delta()
+    assert runner.track_frame(StubFrame(0.0)) is False
+    assert runner.reckoner.distance_m == 0.0
+
+    runner._apply_dead_reckoning(map_fix(), StubFrame(0.1))
+    assert runner.track_frame(StubFrame(0.2)) is True
+    assert runner.reckoner.distance_m > 0.0
+
+
+def test_a_dropout_uses_what_the_odometry_thread_accumulated(runner):
+    """The division of labour: the thread tracks, the loop consumes."""
+    runner._odometry_threaded = True
+    runner.odometry.delta = delta(north=2.2)
+    runner._apply_dead_reckoning(map_fix(north=100.0), StubFrame(0.0))
+
+    for index in range(1, 6):          # five odometry cycles, no localization
+        assert runner.track_frame(StubFrame(index * 0.1)) is True
+
+    # Now one localization cycle fails; it must use the accumulated offset
+    # without running the odometry itself.
+    calls_before = runner.odometry.calls
+    result = runner._apply_dead_reckoning(failed_fix(timestamp=0.6), StubFrame(0.6))
+    assert runner.odometry.calls == calls_before, "the loop must not track"
+    assert result.dead_reckoned is True
+    assert result.position_ned.north_m == pytest.approx(100.0 + 5 * 2.2)
+
+
+def test_nothing_is_published_before_the_odometry_has_tracked_anything(runner):
+    """Reckoning live but no distance yet is no information, not no movement."""
+    runner._odometry_threaded = True
+    runner._apply_dead_reckoning(map_fix(), StubFrame(0.0))
+    result = runner._apply_dead_reckoning(failed_fix(timestamp=0.1), StubFrame(0.1))
+    assert result.valid is False
+
+
+# ---------------------------------------------------------------------------
 # Statistics must stay honest
 # ---------------------------------------------------------------------------
 def test_dead_reckoned_positions_do_not_count_toward_the_lock_rate(runner):
