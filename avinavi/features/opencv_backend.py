@@ -28,8 +28,10 @@ import numpy as np
 
 from ..features.lightglue_matcher import MatchResult
 from ..mapdb.tile import TileFeatures
+from .resize import USE_CONFIGURED_RESIZE
 
 LOG = logging.getLogger(__name__)
+
 
 #: Detectors that produce float descriptors (L2 distance) vs binary (Hamming).
 _FLOAT_DESCRIPTOR_DETECTORS = ("sift",)
@@ -72,36 +74,74 @@ class OpenCVExtractor:
         return self.detector_name in _FLOAT_DESCRIPTOR_DETECTORS
 
     def _ensure_detector(self):
+        """Build the configured detector, or explain precisely why it cannot.
+
+        The explanation matters because the available detectors **depend on the
+        installed OpenCV**. ``cv2.AKAZE_create`` is absent from OpenCV 5.0, for
+        instance, so a configuration that works on one machine raises a bare
+        ``AttributeError: module 'cv2' has no attribute 'AKAZE_create'`` on
+        another — which says nothing about the YAML key that caused it.
+        """
         if self._detector is not None:
             return self._detector
         cv2 = _require_cv2()
-        if self.detector_name == "sift":
-            self._detector = cv2.SIFT_create(
+
+        factories = {
+            "sift": lambda: cv2.SIFT_create(
                 nfeatures=self.max_num_keypoints,
                 contrastThreshold=self.contrast_threshold,
-            )
-        elif self.detector_name == "akaze":
-            self._detector = cv2.AKAZE_create()
-        elif self.detector_name == "orb":
-            self._detector = cv2.ORB_create(nfeatures=self.max_num_keypoints)
-        else:
+            ),
+            "akaze": lambda: cv2.AKAZE_create(),
+            "orb": lambda: cv2.ORB_create(nfeatures=self.max_num_keypoints),
+        }
+        required_attribute = {"sift": "SIFT_create", "akaze": "AKAZE_create",
+                              "orb": "ORB_create"}
+
+        if self.detector_name not in factories:
             raise ValueError(
-                "unknown detector %r; expected sift, akaze or orb" % self.detector_name
+                "unknown features.detector %r; expected one of %s"
+                % (self.detector_name, ", ".join(sorted(factories)))
             )
+        if not hasattr(cv2, required_attribute[self.detector_name]):
+            available = sorted(
+                name for name, attribute in required_attribute.items()
+                if hasattr(cv2, attribute)
+            )
+            raise RuntimeError(
+                "features.detector is %r, but the installed OpenCV (%s) has no "
+                "cv2.%s. Available here: %s. Note that the tile database stores "
+                "descriptors from whichever detector built it, so switching "
+                "means rebuilding it with 'avinavi extract-features'."
+                % (
+                    self.detector_name,
+                    getattr(cv2, "__version__", "unknown"),
+                    required_attribute[self.detector_name],
+                    ", ".join(available) or "none",
+                )
+            )
+        self._detector = factories[self.detector_name]()
         return self._detector
 
     def warmup(self) -> None:
         self._ensure_detector()
 
     def extract(
-        self, image: np.ndarray, resize_max_side: Optional[int] = None
+        self, image: np.ndarray, resize_max_side=USE_CONFIGURED_RESIZE
     ) -> TileFeatures:
-        """Extract features, with keypoints in the input image's pixel grid."""
+        """Extract features, with keypoints in the input image's pixel grid.
+
+        ``resize_max_side`` omitted uses the configured value; ``None`` means do
+        not resize at all.  See :mod:`avinavi.features.resize`.
+        """
         cv2 = _require_cv2()
         detector = self._ensure_detector()
 
         gray = _to_gray_u8(image)
-        max_side = resize_max_side if resize_max_side is not None else self.resize_max_side
+        max_side = (
+            self.resize_max_side
+            if resize_max_side is USE_CONFIGURED_RESIZE
+            else resize_max_side
+        )
         scaled, scale = _resize_max_side(gray, max_side)
 
         keypoints, descriptors = detector.detectAndCompute(scaled, None)
@@ -131,7 +171,7 @@ class OpenCVExtractor:
         )
 
     def extract_image_file(
-        self, path: str, resize_max_side: Optional[int] = None
+        self, path: str, resize_max_side=USE_CONFIGURED_RESIZE
     ) -> TileFeatures:
         cv2 = _require_cv2()
         image = cv2.imread(path, cv2.IMREAD_GRAYSCALE)

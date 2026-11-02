@@ -24,6 +24,7 @@ from typing import Optional
 import numpy as np
 
 from ..mapdb.tile import TileFeatures
+from .resize import USE_CONFIGURED_RESIZE
 
 LOG = logging.getLogger(__name__)
 
@@ -114,17 +115,25 @@ class SuperPointExtractor:
 
     # -- extraction ---------------------------------------------------------
     def extract(
-        self, image: np.ndarray, resize_max_side: Optional[int] = None
+        self, image: np.ndarray, resize_max_side=USE_CONFIGURED_RESIZE
     ) -> TileFeatures:
         """Extract features from a grayscale or BGR image.
 
         Returns keypoints in the coordinate system of the *input* image.
+
+        ``resize_max_side`` omitted uses the configured value; ``None`` means do
+        not resize at all.  See :mod:`avinavi.features.resize` for why that
+        distinction needs a sentinel rather than ``None``.
         """
         model = self._ensure_model()
         torch = self._torch
 
         gray = _to_grayscale_float(image)
-        max_side = resize_max_side if resize_max_side is not None else self.resize_max_side
+        max_side = (
+            self.resize_max_side
+            if resize_max_side is USE_CONFIGURED_RESIZE
+            else resize_max_side
+        )
         scaled, scale = _resize_max_side(gray, max_side)
 
         tensor = torch.from_numpy(scaled).to(self.device)[None, None]
@@ -149,7 +158,7 @@ class SuperPointExtractor:
             image_size=(float(gray.shape[1]), float(gray.shape[0])),
         )
 
-    def extract_image_file(self, path: str, resize_max_side: Optional[int] = None) -> TileFeatures:
+    def extract_image_file(self, path: str, resize_max_side=USE_CONFIGURED_RESIZE) -> TileFeatures:
         try:
             import cv2  # noqa: PLC0415 - optional dependency
         except ImportError as exc:  # pragma: no cover
