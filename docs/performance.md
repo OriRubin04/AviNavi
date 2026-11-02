@@ -1,14 +1,14 @@
 # How fast this runs, and what that costs
 
 **Summary: SuperPoint + LightGlue at the default settings runs at roughly
-0.4 Hz on four CPU cores — not the 2 Hz the configuration assumes. No tested
+0.44 Hz on four CPU cores — not the 2 Hz the configuration assumes. No tested
 configuration reaches 2 Hz. This is now the limiting factor in the whole
 system, not the matching.**
 
-Lock rate alone is not the figure of merit. A fixed wing covers 22 m/s, so 45%
-of cycles locking at 0.4 Hz is a very different proposition from 45% at 2 Hz:
-the first gives a map fix roughly every 5.5 seconds, or **120 metres of
-flight**, and the frame-to-frame odometry has to carry everything in between.
+In navigation terms: **one map fix every ~90 metres of flight**, at 55% lock and
+0.29 m median error. That is survivable — the arithmetic is below — but only
+because the frame-to-frame odometry carries the gap, and only once that odometry
+runs on its own schedule rather than the localization loop's.
 
 ## Measured
 
@@ -19,70 +19,101 @@ since these are x86 cores.
 Reproduce with `tools/run_speed_sweep.py`. Latency is per localization cycle,
 including rectification, extraction, and matching against every candidate tile.
 
-| Setting | Lock | Error p50 | ms mean | ms p95 |
-| --- | --- | --- | --- | --- |
-| reference (4 tiles, 640 px, 1024 kp) | **45.0%** | 0.65 m | 2438 | 3054 |
-| `max_candidate_tiles` 2 | 20.0% | 0.60 m | 1929 | 2357 |
-| `max_candidate_tiles` 1 | 20.0% | 0.60 m | **1476** | **1701** |
-| `resize_max_side` 512 | 45.0% | 0.65 m | 2339 | 2831 |
-| `resize_max_side` 384 | 45.0% | 0.65 m | 2345 | 2742 |
-| `max_num_keypoints` 512 | 42.5% | 0.32 m | 2414 | — † |
-| `max_num_keypoints` 256 | **2.5%** | 0.42 m | 2044 | — † |
-| 2 tiles + 512 px | 20.0% | 0.60 m | — † | — † |
-| 2 tiles + 512 kp | 17.5% | 0.32 m | 1788 | 1978 |
-| 1 tile + 512 px + 512 kp | 17.5% | 0.32 m | 1504 | 1745 |
+The last two columns are the ones that matter for navigation. **Lock rate alone
+is misleading** when cycle times differ by 50%: a configuration that locks half
+as often but runs twice as fast delivers the same number of fixes, and it is the
+*gap between fixes* that the dead reckoning has to cover, not the ratio.
 
-† Some p95 figures from that run are unreliable: other work was running on the
-same four cores during part of it, which shows up as p95 values of 6456, 4681
-and 12545 ms that are inconsistent with their own means. The *lock rates* from
-those rows are unaffected, since they do not depend on timing. The clean rows
-are the ones with a plausible mean-to-p95 ratio.
+| Setting | Lock | Error p50 | ms mean | ms p95 | fix/s | Gap at 22 m/s |
+| --- | --- | --- | --- | --- | --- | --- |
+| reference (4 tiles, 640 px, 1024 kp) | **55.0%** | 0.29 m | 2260 | 2759 | 0.243 | 90 m |
+| `max_candidate_tiles` 2 | 27.5% | 0.51 m | 1768 | 2131 | 0.156 | 141 m |
+| `max_candidate_tiles` 1 | 27.5% | 0.51 m | 1522 | 1764 | 0.181 | 122 m |
+| `resize_max_side` 512 | **55.0%** | 0.29 m | 2227 | 2813 | **0.247** | **89 m** |
+| `resize_max_side` 384 | **55.0%** | 0.29 m | 2230 | 2734 | **0.247** | **89 m** |
+| `max_num_keypoints` 512 | 40.0% | 0.26 m | 1739 | 1903 | 0.230 | 96 m |
+| `max_num_keypoints` 256 | 5.0% | 0.25 m | 1554 | 1679 | 0.032 | 684 m |
+| 2 tiles + 512 px | 27.5% | 0.51 m | 1680 | 1986 | 0.164 | 134 m |
+| 2 tiles + 512 kp | 12.5% | 0.21 m | 1482 | 1651 | 0.084 | 261 m |
+| 1 tile + 512 px + 512 kp | 12.5% | 0.21 m | 1442 | 1647 | 0.087 | 254 m |
 
-Zero false fixes in every configuration.
+Zero false fixes in every configuration. Every p95 is within ~1.25× of its mean,
+which is what a clean measurement looks like — an earlier version of this table
+had p95 values of 6456 and 12545 ms because other work was sharing the four
+cores, and those were discarded rather than published.
 
-> **This table predates the `resize_max_side` sentinel fix and is being
-> re-measured.** Two things change. The lock rates are understated — the same
-> A/B went from 41.7% to 56.7% once map tiles were described at full resolution
-> instead of the camera's working size. And the two `resize_max_side` rows no
-> longer mean what they meant: under the bug that setting controlled the
-> resolution of *both* the live frame and the tile features, so "640 and 384
-> behave identically" was measured with both sides moving together. With the fix
-> it affects the live frame alone, and that row needs re-running before the
-> "resolution is a free lever" conclusion can be trusted. The
-> `max_candidate_tiles` and `max_num_keypoints` conclusions are unaffected by
-> the fix, since neither setting was entangled with it.
+**The headline number is the last column: at best, one map fix every ~90 metres
+of flight.** Everything about the system's viability follows from that.
 
 ## What the sweep says
 
-**1. `max_candidate_tiles` is the only real time lever, and it is expensive.**
-Going from 4 candidates to 1 cuts the mean from 2438 ms to 1476 ms — but halves
-the lock rate, from 45% to 20%. LightGlue runs **once per candidate tile**, so
-this multiplies the dominant cost directly; and the lock rate falling that
-sharply says the search window is not precise enough to put the right tile
-first. Which points at the cheapest available win: **a tighter search window
-buys both time and hit rate at once**, because fewer candidates would be needed
-for the same result. The frame-to-frame odometry narrowing the window between
-map fixes is exactly that mechanism.
+**1. `max_candidate_tiles` is the only real time lever, and it is a bad
+trade.** 4 → 2 cuts the mean from 2260 ms to 1768 ms but halves the lock rate,
+55.0% → 27.5%, so the fixes per second get *worse* (0.243 → 0.156). LightGlue
+runs **once per candidate tile**, so this multiplies the dominant cost directly.
 
-**2. Frame resolution appeared to be nearly free to reduce, and to buy
-nothing.** 640 → 384 changed neither lock rate (45.0% either way) nor latency
-(2438 → 2345 ms), which says extraction is **not** the bottleneck — matching is.
-Treat the specific numbers as provisional: as noted above, this setting was
-entangled with the tile resolution when the sweep was run, so the row is being
-re-measured. The broad conclusion that extraction is not where the time goes is
-consistent with everything else here.
+The shape of that loss is informative: 2 → 1 candidate costs nothing further
+(27.5% either way) while 4 → 2 costs half. So the true tile is often ranked
+third or fourth, almost never second. **The search window's ordering is doing
+poorly**, and improving it is the one change that would buy time *and* hit rate
+together — fewer candidates needed for the same result. That is the highest-value
+optimisation available, and it is a ranking problem, not a speed problem.
 
-**3. Keypoint count has a cliff.** 1024 → 512 costs almost nothing in lock rate
-(45.0% → 42.5%) and actually *improves* the median error. 512 → 256 collapses it
-to 2.5%. So 512 is close to free and 256 is unusable; there is no gentle slope
-to trade along.
+**2. Frame resolution is free to reduce, and buys nothing.** 640 → 512 → 384 all
+give 55.0% lock at ~2230 ms. Measured cleanly, with the tile resolution no
+longer entangled with this setting. Extraction is **not** the bottleneck;
+matching is, and the cost is dominated by the ~1024 keypoints per *tile* rather
+than by the live frame.
 
-**4. Nothing fits 2 Hz.** The fastest configuration tested is 1504 ms mean,
-1745 ms p95 — three and a half times over a 500 ms budget, for 17.5% lock.
+**3. Keypoint count is a real trade with a cliff at the end.** 1024 → 512 costs
+15 points of lock (55.0% → 40.0%) and saves 23% of the time (2260 → 1739 ms),
+which very nearly breaks even on fixes per second (0.243 → 0.230) while leaving
+more headroom — a defensible choice. 512 → 256 collapses to 5.0%. Note this
+setting applies to the **tile** features too, which is why it moves the clock at
+all where `resize_max_side` does not.
+
+**4. Nothing fits 2 Hz.** The fastest configuration tested is 1442 ms mean,
+1647 ms p95 — more than three times over a 500 ms budget, for 12.5% lock.
 
 The budget has to be judged on **p95, not the mean**. A rate set from the mean
 means the loop silently falls behind on exactly the hard frames, which are the
 ones where a fix matters.
+
+## Is a 90 metre gap survivable?
+
+This is the question the whole table exists to answer, and the arithmetic is
+encouraging — with one condition that turned out to matter a great deal.
+
+At `visual_odometry.drift_fraction` of 0.05, carrying the position over 90 m of
+flight adds **4.5 m** of uncertainty. Against a `false_fix_threshold_m` of 60 m
+and a map-fix error of 0.29 m median, that is comfortable; the dead-reckoned
+sigma reported to the EKF grows from ~1 m to ~4.6 m between fixes and then
+collapses again. `max_dead_reckoning_s` of 10 s covers 220 m, so the limit is
+generous relative to the 90 m gap and the system goes silent only after roughly
+two consecutive missed fixes.
+
+**The condition: the odometry has to run on its own schedule, not the
+localization loop's.** Lucas-Kanade needs consecutive frames to overlap heavily,
+and that was measured:
+
+| Frame gap | Baseline at 22 m/s | Frame overlap | Result |
+| --- | --- | --- | --- |
+| 0.1 s | 2 m | 98% | 210 points, error 0.00 m |
+| 0.5 s | 11 m | 92% | 123 points, error 0.00 m |
+| 1.0 s | 22 m | 84% | **unusable** |
+| 2.3 s | 51 m | 63% | **unusable** |
+
+Tracking between *localization* frames, 2.3 s apart, would produce nothing at
+all — the dead reckoning would be present and inert exactly when needed. Hence
+`rates.visual_odometry_hz`, default 5 Hz, on its own thread. **Do not tie it to
+`visual_localization_hz`.**
+
+And a sharper lesson from the same measurement: at the 1 s gap the tracker did
+not fail cleanly. It returned 7.4 m for a true 22 m, from 23 points that
+disagreed among themselves by 14.7 m — enough points to pass the minimum count,
+with nothing checking whether they agreed. There is now a residual gate for
+exactly this, because dead reckoning on that estimate would walk the solution
+away from the aircraft at a third of its true speed, confidently.
 
 ## What to do about it
 
@@ -95,6 +126,10 @@ honest default, and it is what the architecture was built for:
 reporting its drift as a growing sigma. A 0.4 Hz map fix rate with sound dead
 reckoning is a usable navigation system; a 2 Hz rate that misses its deadline is
 not.
+
+**Improve the search window's ordering**, per finding 1. The true tile sitting
+third or fourth in the candidate list is costing either half the lock rate or
+40% of the cycle time, and neither needs to be paid.
 
 **Change the runtime, not the model.** ONNX Runtime is reported at about 2.4×
 PyTorch for this workload, which would bring the reference configuration to
