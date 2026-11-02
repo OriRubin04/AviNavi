@@ -231,6 +231,13 @@ Done since this plan was written: the odometry is wired into the runner
 - **A background run piped through `grep` shows no interim output**, because
   grep buffers. Use `python3 -u` and filter when reading the log, not in the
   pipeline.
+- **`pgrep -f` and `pkill -f` match the watcher's own command line.** A wait
+  loop written as `until ! pgrep -f "tools/run_experiment"; do …` never exits,
+  because the shell running it contains that string; and `pkill -f
+  run_experiment` once killed the shell that was about to start a job, since the
+  heredoc it was writing mentioned the name. Wait on a **PID** (`kill -0 $pid`)
+  instead, and check for a job with a pattern specific enough to exclude the
+  checker (`pgrep -af "python3 -u tools/…"`).
 - **The repository has no base branch**, so the draft PR cannot be created yet
   — `main` does not exist and the feature branch is the only history. Creating
   it is a structural decision for the repository owner.
