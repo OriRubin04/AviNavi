@@ -145,30 +145,44 @@ SuperPoint + LightGlue runs at ~0.4 Hz on four cores and **no tested
 configuration reaches 2 Hz**. The architecture is confirmed; the configuration
 is not yet flyable.
 
-What the sweep established:
+In navigation terms: **one map fix every ~90 m of flight**, at 55% lock and
+0.29 m median error, 0 false fixes.
 
-- `max_candidate_tiles` is the only real time lever (4 → 1 cuts 2438 → 1476 ms)
-  and it costs half the lock rate (45% → 20%). LightGlue runs once per
-  candidate, so this multiplies the dominant cost — and the lock rate falling
-  that hard means the search window is not precise enough to put the right tile
-  first.
-- `resize_max_side` 640 → 384 changes **neither** lock rate nor latency.
-  Extraction is not the bottleneck; matching is.
-- `max_num_keypoints` 1024 → 512 is nearly free (45.0% → 42.5%, better median
-  error); 512 → 256 collapses to 2.5%. A cliff, not a slope.
+What the clean sweep established:
+
+- `max_candidate_tiles` is a **bad trade**, not merely expensive: 4 → 2 halves
+  the lock rate (55.0% → 27.5%) and makes fixes-per-second *worse*. And the
+  shape of the loss is the useful part — 2 → 1 costs nothing further, so the
+  true tile is often ranked **third or fourth and almost never second**. The
+  search window's *ordering* is doing poorly.
+- `resize_max_side` 640 → 512 → 384: all 55.0% at ~2230 ms. Genuinely free and
+  genuinely useless. Extraction is not the bottleneck; the ~1024 keypoints per
+  **tile** are.
+- `max_num_keypoints` 1024 → 512 costs 15 points of lock, saves 23% of the
+  time, roughly breaks even on fixes/second; 256 collapses to 5.0%. It moves
+  the clock where `resize_max_side` does not because it applies to tile
+  features too.
 
 So the remaining work, in value order:
 
-1. **Tighten the search window** so fewer candidate tiles are needed. This is
-   the one change that buys time *and* hit rate together, and the sweep points
-   straight at it. The frame-to-frame odometry narrowing the window between map
-   fixes is the mechanism; it is implemented and wired but the window still
-   comes from `tile_search.search_radius_m` alone.
-2. **ONNX Runtime** (~2.4× reported) — best effort-to-benefit ratio available,
-   untried here.
+1. **Improve the candidate ordering**, not just the window radius. The sweep
+   says the right tile is in the list but ranked low, so this is a ranking
+   problem rather than a speed one — and it is the only change that buys time
+   *and* hit rate together. Start with `MapDatabase.candidates()`: it orders by
+   distance from the search centre, which ignores the aircraft's heading and
+   the previous fix's velocity. The localizability score (§3.3) is another
+   signal available for free.
+2. **ONNX Runtime** (~2.4× reported) — best effort-to-benefit ratio, untried.
 3. **XFeat + LighterGlue** (4–8× faster for ~5% relative AUC) would put 2 Hz in
    reach; larger change, needs its own A/B.
 4. Set `rates.visual_localization_hz` from the measured **p95**.
+
+**Resolved while measuring this:** the dead reckoning was wired but *inert*,
+because the odometry ran once per localization cycle — a 51 m baseline, where
+Lucas-Kanade needs better than ~11 m. It now runs on its own thread at
+`rates.visual_odometry_hz`. And at the 1 s baseline it did not fail cleanly but
+returned 7.4 m for a true 22 m from points that disagreed by 14.7 m, so there is
+now a residual gate. Both are in `docs/performance.md`.
 
 **Do not pursue a Hailo NPU** — LightGlue's dynamic keypoint count and
 data-dependent early exit are incompatible with its static dataflow compiler.

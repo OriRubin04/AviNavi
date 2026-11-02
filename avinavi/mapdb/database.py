@@ -13,7 +13,7 @@ import os
 from collections import OrderedDict
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
-from ..geo import BoundingBox, bounding_box_around
+from ..geo import BoundingBox, bounding_box_around, haversine_distance_m
 from ..types import GeoPoint
 from .tile import MapTile, TileFormatError, TileMetadata, METADATA_FILENAME
 
@@ -235,9 +235,26 @@ class MapDatabase:
     ) -> List[MapTile]:
         """Tiles whose footprint comes within ``radius_m`` of ``center``.
 
-        Results are ordered nearest-first by the distance from ``center`` to the
-        tile footprint (0 when ``center`` is inside the tile), which puts the
-        most likely match first so ``limit`` truncates the least useful tiles.
+        Ordered most-likely-first, so ``limit`` truncates the least useful
+        tiles.  The ordering is by distance to the tile **footprint** and then,
+        as the tie-break, by distance to the tile **centre**.
+
+        That second key is not a refinement; it does the real work.  Tiles
+        overlap - 30% by default - so the aircraft is normally inside *several*
+        at once, and every one of those has a footprint distance of exactly
+        zero.  Ordering on the footprint alone therefore leaves the containing
+        tiles in arbitrary order (it was ``tile_id``, i.e. alphabetical), and a
+        measured sweep showed the consequence: cutting
+        ``lightglue.max_candidate_tiles`` from 4 to 2 halved the lock rate while
+        2 to 1 cost nothing, which is the signature of the right tile landing
+        third or fourth as often as first.
+
+        Distance to the centre is the right discriminator because a frame near a
+        tile's centre has its **whole camera footprint** inside that tile, while
+        the same frame near a tile's edge is half outside it and can only match
+        on the half that overlaps.  Preferring the tile the aircraft is most
+        deeply inside maximises the inliers available.
+
         ``prefer`` promotes named tiles - normally the tile that produced the
         previous fix - to the front, since spatial continuity makes it by far
         the most likely match for the next frame.
@@ -246,16 +263,19 @@ class MapDatabase:
             raise ValueError("search radius must be positive")
 
         box = bounding_box_around(center, radius_m)
-        scored: List[Tuple[float, MapTile]] = []
+        scored: List[Tuple[float, float, str, MapTile]] = []
         for tile in self._tiles.values():
             if not _boxes_intersect(tile.bounds, box):
                 continue
             distance = tile.bounds.distance_to_m(center)
             if distance <= radius_m:
-                scored.append((distance, tile))
+                centre_distance = haversine_distance_m(center, tile.bounds.center)
+                # tile_id stays as the final key so the order is deterministic
+                # when two tiles are genuinely equidistant.
+                scored.append((distance, centre_distance, tile.tile_id, tile))
 
-        scored.sort(key=lambda item: (item[0], item[1].tile_id))
-        ordered = [tile for _, tile in scored]
+        scored.sort(key=lambda item: (item[0], item[1], item[2]))
+        ordered = [item[3] for item in scored]
 
         if prefer:
             preferred_ids = [tid for tid in prefer if tid in self._tiles]

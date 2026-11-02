@@ -195,6 +195,74 @@ def test_a_corrupt_index_falls_back_to_scanning(grid_database):
     assert len(MapDatabase.load(root)) == 9
 
 
+def test_overlapping_tiles_are_ordered_by_how_deeply_they_contain_the_point():
+    """The ordering fix that a measured sweep pointed at.
+
+    Tiles overlap, so the aircraft is normally inside several at once and every
+    one of them has a footprint distance of exactly zero. Ordering on the
+    footprint alone left them in alphabetical order, and the sweep showed the
+    cost: cutting max_candidate_tiles from 4 to 2 halved the lock rate while 2
+    to 1 cost nothing — the signature of the right tile landing third or fourth
+    as often as first.
+
+    A frame near a tile's centre has its whole camera footprint inside that
+    tile; the same frame near the edge is half outside it. So the tile the
+    aircraft is most deeply inside must come first, whatever it is called.
+    """
+    import tempfile
+
+    root = tempfile.mkdtemp()
+    origin = LocalOrigin(32.0853, 34.7818, 40.0)
+
+    # Three heavily overlapping 400 m tiles, named so that alphabetical order
+    # is the *opposite* of the correct order for a point near "tile_c".
+    for name, centre_north in (("tile_a", -150.0), ("tile_b", 0.0), ("tile_c", 150.0)):
+        south_west = origin.to_geo(NEDPosition(centre_north - 200.0, -200.0, 0.0))
+        north_east = origin.to_geo(NEDPosition(centre_north + 200.0, 200.0, 0.0))
+        write_tile(
+            root,
+            name,
+            BoundingBox(
+                south_west.lon_deg, south_west.lat_deg,
+                north_east.lon_deg, north_east.lat_deg,
+            ),
+        )
+
+    database = MapDatabase.load(root)
+    # 180 m north is inside tile_b (-200..200) and tile_c (-50..350), but it is
+    # 30 m from tile_c's centre and 180 m from tile_b's.
+    probe = origin.to_geo(NEDPosition(180.0, 0.0, 0.0))
+    candidates = database.candidates(center=probe, radius_m=50.0)
+
+    assert len(candidates) >= 2, "the probe should be inside more than one tile"
+    assert candidates[0].tile_id == "tile_c", (
+        "expected the most deeply containing tile first, got %s"
+        % [t.tile_id for t in candidates]
+    )
+
+
+def test_an_equidistant_tie_is_broken_deterministically():
+    """Two runs must order the same tiles the same way."""
+    import tempfile
+
+    root = tempfile.mkdtemp()
+    origin = LocalOrigin(32.0853, 34.7818, 40.0)
+    for name, east in (("tile_z", -100.0), ("tile_a", 100.0)):
+        south_west = origin.to_geo(NEDPosition(-200.0, east - 200.0, 0.0))
+        north_east = origin.to_geo(NEDPosition(200.0, east + 200.0, 0.0))
+        write_tile(
+            root, name,
+            BoundingBox(
+                south_west.lon_deg, south_west.lat_deg,
+                north_east.lon_deg, north_east.lat_deg,
+            ),
+        )
+    database = MapDatabase.load(root)
+    first = [t.tile_id for t in database.candidates(origin.geo, radius_m=50.0)]
+    second = [t.tile_id for t in database.candidates(origin.geo, radius_m=50.0)]
+    assert first == second
+
+
 def test_an_index_left_over_from_an_earlier_build_is_not_trusted(grid_database):
     """A stale index must never override the tiles' own georeferencing.
 
