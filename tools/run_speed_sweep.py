@@ -56,6 +56,12 @@ def main() -> int:
         help="per-cycle latency target; 0.5 s is 2 Hz",
     )
     parser.add_argument("--out", default=None)
+    parser.add_argument(
+        "--only",
+        default=None,
+        help="run only the rows whose label contains this text, so one "
+        "hypothesis can be tested without re-running rows already known",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.WARNING, format="%(levelname)-7s %(name)-24s %(message)s")
@@ -78,19 +84,39 @@ def main() -> int:
     )
     camera = RenderSettings(width_px=1280, height_px=720, horizontal_fov_deg=60.0)
 
-    # (label, candidate tiles, resize, keypoints)
+    def no_prefer(config):
+        """Stop promoting the previously matched tile to the front.
+
+        Worth its own rows because the preference consumes a candidate slot:
+        ``MapDatabase.candidates`` applies ``limit`` *after* promotion, so with
+        ``max_candidate_tiles = 1`` the only tile tried is the one that matched
+        last time, wherever the aircraft has since flown.
+        """
+        config.tile_search.prefer_last_matched_tile = False
+
+    # (label, candidate tiles, resize, keypoints, extra config mutation)
     rows = [
-        ("reference", 4, 640, 1024),
-        ("tiles 2", 2, 640, 1024),
-        ("tiles 1", 1, 640, 1024),
-        ("resize 512", 4, 512, 1024),
-        ("resize 384", 4, 384, 1024),
-        ("keypoints 512", 4, 640, 512),
-        ("keypoints 256", 4, 640, 256),
-        ("tiles 2 + resize 512", 2, 512, 1024),
-        ("tiles 2 + kp 512", 2, 640, 512),
-        ("tiles 1 + resize 512 + kp 512", 1, 512, 512),
+        ("reference", 4, 640, 1024, None),
+        ("tiles 2", 2, 640, 1024, None),
+        ("tiles 1", 1, 640, 1024, None),
+        ("resize 512", 4, 512, 1024, None),
+        ("resize 384", 4, 384, 1024, None),
+        ("keypoints 512", 4, 640, 512, None),
+        ("keypoints 256", 4, 640, 256, None),
+        ("tiles 2 + resize 512", 2, 512, 1024, None),
+        ("tiles 2 + kp 512", 2, 640, 512, None),
+        ("tiles 1 + resize 512 + kp 512", 1, 512, 512, None),
+        # Does the last-matched-tile preference pay for the slot it takes?
+        ("no prefer, tiles 4", 4, 640, 1024, no_prefer),
+        ("no prefer, tiles 2", 2, 640, 1024, no_prefer),
+        ("no prefer, tiles 1", 1, 640, 1024, no_prefer),
     ]
+
+    if args.only:
+        rows = [row for row in rows if args.only.lower() in row[0].lower()]
+        if not rows:
+            print("no rows match %r" % args.only)
+            return 2
 
     reports = []
     print(
@@ -103,11 +129,13 @@ def main() -> int:
     print(header)
     print("-" * len(header))
 
-    for label, tiles, resize, keypoints in rows:
+    for label, tiles, resize, keypoints, mutate in rows:
         config = base_config(args.backend)
         config.lightglue.max_candidate_tiles = tiles
         config.superpoint.resize_max_side = resize
         config.superpoint.max_num_keypoints = keypoints
+        if mutate is not None:
+            mutate(config)
         started = time.time()
         report = run_simulation(
             config=config,

@@ -53,11 +53,29 @@ trade.** 4 → 2 cuts the mean from 2260 ms to 1768 ms but halves the lock rate,
 runs **once per candidate tile**, so this multiplies the dominant cost directly.
 
 The shape of that loss is informative: 2 → 1 candidate costs nothing further
-(27.5% either way) while 4 → 2 costs half. So the true tile is often ranked
-third or fourth, almost never second. **The search window's ordering is doing
-poorly**, and improving it is the one change that would buy time *and* hit rate
-together — fewer candidates needed for the same result. That is the highest-value
-optimisation available, and it is a ranking problem, not a speed problem.
+(27.5% either way) while 4 → 2 costs half. Something about the candidate *list*
+rather than its radius is responsible, since the right tile is evidently
+reachable with four slots and not with two.
+
+**One explanation has been tested and rejected.** The obvious suspect was the
+ordering: `MapDatabase.candidates` ranked tiles by distance to the tile
+footprint, which is exactly zero for every tile containing the aircraft, so
+among the two to four overlapping tiles it sits inside, the order fell through
+to an alphabetical `tile_id` tie-break. Distance to the tile *centre* is better
+motivated — a frame near a tile's centre has its whole footprint inside that
+tile — and the tie-break was duly fixed. **It made no difference at all:**
+reference 55.0% → 55.0%, two tiles 27.5% → 27.5%, one tile 27.5% → 27.5%. The
+change is retained because the old ordering was arbitrary and the new one is
+not, but it does not explain the observation and is not an improvement.
+
+The next candidate explanation, under test, is the **last-matched-tile
+preference**. `tile_search.prefer_last_matched_tile` promotes the previous
+cycle's tile to the front of the list, and `candidates` applies `limit`
+*after* promotion — so with `max_candidate_tiles = 1` the only tile tried is
+the one that matched last time, wherever the aircraft has since flown. That
+would explain a halving directly, and it predicts that turning the preference
+off should raise the one- and two-candidate rows without touching the
+four-candidate one.
 
 **2. Frame resolution is free to reduce, and buys nothing.** 640 → 512 → 384 all
 give 55.0% lock at ~2230 ms. Measured cleanly, with the tile resolution no
