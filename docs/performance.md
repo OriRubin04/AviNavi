@@ -137,6 +137,48 @@ away from the aircraft at a third of its true speed, confidently.
 
 In order of how much they are worth:
 
+**Fly higher — this is the largest single lever found so far, and it is free.**
+Measured over 150 cycles per altitude on one trajectory, one map and one
+camera, with every variant rendering all 150 frames:
+
+| Cruise | Rectified frame | Lock | Error p50 | Inliers |
+| --- | --- | --- | --- | --- |
+| 120 m | 277 × 156 px | 59.3% | 0.49 m | 42 |
+| 180 m | 416 × 234 px | 91.3% | 0.26 m | 79 |
+| **240 m** | **554 × 312 px** | **100.0%** | **0.18 m** | 120 |
+| 300 m | 693 × 390 px | 100.0% | 0.20 m | 141 |
+| 360 m | 831 × 467 px | 100.0% | 0.25 m | 152 |
+
+Zero false fixes throughout. Going from 120 m to 240 m is a change to the
+flight plan, not to the code, the camera or the map, and it is worth **forty
+points of lock rate** while nearly tripling the inlier count.
+
+The reason is visible in the second column. Rectification resamples the frame to
+the tile's ground sample distance, so the image SuperPoint actually sees is
+`footprint / tile_gsd` on a side. At 120 m against a 0.5 m/px map that is 277 px
+wide — from a 1280 px sensor. Ninety-five per cent of the pixels are thrown away
+before any matching happens. Flying higher widens the footprint, so more of the
+sensor survives the warp.
+
+**There is an optimum, and it is not "as high as possible."** Error bottoms out
+at 240 m and then worsens: 0.18 m, 0.20 m, 0.25 m. Two effects pull against each
+other — more inliers stabilise the solve, while a coarser live GSD (0.108 m/px
+at 120 m, 0.325 m/px at 360 m) makes every pixel of matching error worth three
+times as many metres. Below 240 m the first wins; above it the second does.
+
+**A wider lens buys the same thing without the altitude — up to a limit.**
+120 m with a 100 degree lens covers 286 m of ground and rectifies to 572 px,
+near-identical to 240 m with a 60 degree lens at 554 px. They measured 125
+inliers at 0.17 m against 120 inliers at 0.18 m: a twofold difference in
+altitude for a 4% difference in result.
+
+The limit is hard and geometric. At 120 degrees the frame edge sits 60 degrees
+from nadir, so at 30 degrees of bank it reaches the horizon and those frames
+cannot be rendered at all. In the air that is not a dropped frame, it is a frame
+with sky in it. **Keep `half the field of view + the bank limit` below about 80
+degrees**: with ArduPlane's 30 degree stall-prevention floor that caps the
+usable lens at about 100 degrees.
+
 **Accept a lower rate and let dead reckoning cover the gap.** This is the
 honest default, and it is what the architecture was built for:
 `rates.visual_localization_hz` set from the measured p95, with
