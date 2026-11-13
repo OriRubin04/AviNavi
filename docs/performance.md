@@ -172,30 +172,41 @@ points of lock rate** while nearly tripling the inlier count.
 Altitude and rectified size move together in that table, so it does not separate
 them. This does.
 
-Starve the keypoint budget to 512 so nothing sits at the 100% ceiling, then
-compare three variants — one that shares *altitude* with the failure and
-*rectified size* with the success:
+Starve the keypoint budget to 256 so that *nothing* sits at the 100% ceiling —
+two numbers at a ceiling agree about nothing — then compare three variants, one
+of which shares its *altitude* with the failure and its *rectified size* with
+the success:
 
-| Variant | Altitude | Rectified | Lock | Inliers |
-| --- | --- | --- | --- | --- |
-| 120 m, 60 deg | 120 m | 277 px | **17.3%** | 29 |
-| 120 m, 100 deg | **120 m** | **572 px** | **100.0%** | 87 |
-| 240 m, 60 deg | 240 m | 554 px | 100.0% | 82 |
+| Variant | Altitude | Rectified | Lock | Inliers | Error p50 |
+| --- | --- | --- | --- | --- | --- |
+| 120 m, 60 deg | 120 m | 277 px | **14.7%** | 25 | 0.22 m |
+| 120 m, 100 deg | **120 m** | **572 px** | **90.7%** | 52 | 0.14 m |
+| 240 m, 60 deg | 240 m | 554 px | 88.7% | 51 | 0.13 m |
 
-The middle row flies at exactly the altitude of the 17.3% failure and scores
-100%, tracking its rectified-size twin (87 inliers against 82) rather than its
-altitude twin (29). The prediction was written before the run and could have
-come out the other way; it did not.
+The middle row flies at exactly the altitude of the 14.7% failure and scores
+90.7%. It tracks its rectified-size twin — 88.7% against 90.7%, 51 inliers
+against 52, 0.13 m against 0.14 m — and not its altitude twin, which it beats by
+76 points. The prediction was written down as "about 88%" before the run; it
+could have come out at 15% and refuted the whole thing.
+
+Every number in that table is off the ceiling, so the lock rate itself
+discriminates rather than standing in for the inlier count. All three reported
+zero false fixes, so none of them is contaminated by a blackout.
 
 **Altitude was never the cause. It is one way to widen the footprint.**
 
-Read that 17.3% carefully, though — it is not a uniformly hard run. Its failure
-runs were `[116, 4, 1, 1, 1, 1]`: **one blackout of 116 consecutive cycles**
-accounts for 116 of the 124 failures. The two wide-footprint variants recorded
-no failure runs at all, `count: 0`. So the honest statement is not "small
-rectified frames score lower", it is **"small rectified frames can lose the
-thread completely and not get it back"** — which is worse, and is the subject of
-the next section.
+Replicated at two further budgets. The pair stays together and the baseline
+stays far below it:
+
+| Budget | 120 m, 60 deg (277 px) | 240 m, 60 deg (554 px) | 120 m, 100 deg (572 px) |
+| --- | --- | --- | --- |
+| 512 | 17.3% | 100.0% | 100.0% |
+| 384 | 49.3% | 99.3% | 100.0% |
+| 256 | 14.7% | 88.7% | 90.7% |
+
+The baseline column is not monotone in the budget, and that is not noise about
+difficulty — see *lock rate is a noisy measure* below. The two wide-footprint
+columns move together at every budget, which is the result.
 
 ### Three routes to the same place
 
@@ -265,12 +276,29 @@ a doubtful fix is not one bad position but every position after it. A re-anchor
 path exists for exactly this (`docs/manual-reanchor.md`) and this is the
 strongest argument yet for keeping it reachable in flight.
 
-It also means **lock rate is a noisy measure wherever a blackout is possible**,
-and it should not be read as difficulty. The same variant scored 17.3% at a 512
-keypoint budget and 49.3% at 384 — better on the smaller budget — because the
+### Lock rate is a noisy measure wherever a blackout is possible
+
+It should not be read as difficulty. The 120 m baseline scored **17.3% at a 512
+keypoint budget and 49.3% at 384** — better on the *smaller* budget — because the
 512 run fell into a terminal blackout and the 384 run did not. Nothing about the
-task got easier. Inlier counts (29 against 24) and failure-run lengths describe
-these runs honestly; a single lock-rate number does not.
+task got easier.
+
+The three baseline runs decompose like this:
+
+| Budget | Lock | False fixes | Failure runs | What actually happened |
+| --- | --- | --- | --- | --- |
+| 512 | 17.3% | 3.8% | `116, 4, 1, 1, 1, 1` | a false fix at cycle 33, then 116 cycles to the end |
+| 384 | 49.3% | 0.0% | `53, 9, 6, 5, 1, 1, 1` | a long blackout it recovered from |
+| 256 | 14.7% | 0.0% | `104, 11, 9, 3, 1` | never acquired properly: 104 failures from cycle 1 |
+
+Three very different runs, and the lock rate alone distinguishes none of them.
+Only the 256 row is honestly described as "the task was too hard" — a 277 px
+image with a 256 keypoint budget does not carry enough to match, and it failed
+from the first cycle rather than losing something it had.
+
+So report inlier counts and failure-run structure alongside the lock rate.
+A single percentage conceals the difference between a hard run, a run that
+stumbled and recovered, and a run that was poisoned once and never came back.
 
 **A blackout does not require a false fix, though.** The same variant at a 384
 keypoint budget reported `NOT supported`:
