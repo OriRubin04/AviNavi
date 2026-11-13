@@ -265,13 +265,46 @@ a doubtful fix is not one bad position but every position after it. A re-anchor
 path exists for exactly this (`docs/manual-reanchor.md`) and this is the
 strongest argument yet for keeping it reachable in flight.
 
-*Scope of the claim: this is one measured event, not a rate. It establishes that
-a false fix can end a flight's localization, and the structure of the tile
-search says why. It does not establish that every false fix does — that would
-need many runs with false fixes in them, and the only configuration found so
-far that produces any is one this document recommends against flying.
-`SimulationReport.blackouts_after_false_fix()` is the measurement, and its tests
-pin the negative cases so it can report `NOT supported`.*
+It also means **lock rate is a noisy measure wherever a blackout is possible**,
+and it should not be read as difficulty. The same variant scored 17.3% at a 512
+keypoint budget and 49.3% at 384 — better on the smaller budget — because the
+512 run fell into a terminal blackout and the 384 run did not. Nothing about the
+task got easier. Inlier counts (29 against 24) and failure-run lengths describe
+these runs honestly; a single lock-rate number does not.
+
+**A blackout does not require a false fix, though.** The same variant at a 384
+keypoint budget reported `NOT supported`:
+
+```
+false fix cycles      : (none)
+failure runs started at: 17, 28, 32, 86, 93, 113, 134
+failure run lengths    : 53, 9, 6, 5, 1, 1, 1
+```
+
+No false fix anywhere, and still a 53-cycle run of failures. It is also certain
+that the system **recovered** from it: the last failure run starts at cycle 134,
+and a 53-cycle run starting there would end past cycle 150, so the long run is
+not the last one — there were valid fixes after it.
+
+So the two observations separate into a distinction worth keeping:
+
+| | Blackout happens? | Recovers? |
+| --- | --- | --- |
+| No false fix (384) | yes, 53 cycles | **yes** |
+| After a false fix (512) | yes, 116 cycles | **never** |
+
+Which fits the structure: without a false fix the search centre is still roughly
+right and merely drifting, so a later frame can re-acquire. After a false fix it
+is actively wrong, and nothing in the search can find its way back.
+
+*Scope. Each row of that table is a single observation. The measurement
+establishes that a false fix can end a flight's localization, and that blackouts
+also occur without one. It does not establish a rate for either, and it does not
+establish that every false fix is terminal — that needs many runs containing
+false fixes, and the only configuration found so far that produces any is one
+this document recommends against flying.
+`SimulationReport.blackouts_after_false_fix()` is the measurement; its tests pin
+the negative cases, and it did return `NOT supported` here.*
 
 **There is an optimum, and it is not "as high as possible."** Error bottoms out
 at 240 m and then worsens: 0.18 m, 0.20 m, 0.25 m. Two effects pull against each
