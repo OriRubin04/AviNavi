@@ -232,13 +232,30 @@ are scarce — which is a third, independent argument for the same change, and a
 reason to treat `geometry.min_inliers` as a floor that should rise, not fall, if
 the rectified frame is small.
 
-**And a false fix does not cost one bad position.** The same run that produced
-the 3.8% also produced the 116-cycle blackout, and the two are almost certainly
-the same event: the tile search is centred on the last accepted position, so a
-fix on the wrong ground moves the search window to the wrong ground, every
-subsequent candidate tile is wrong, and nothing can re-acquire. Six failure
-runs, one of them 116 long; the other five are 4, 1, 1, 1 and 1 — ordinary hard
-frames.
+**And a false fix does not cost one bad position — it cost the rest of this
+flight.** Measured, not inferred. The run was repeated with the cycle index of
+every false fix and of every failure run recorded:
+
+```
+false fix at cycle      : 33
+failure runs started at : 17, 22, 26, 28, 32, 34
+failure run lengths     : 4, 1, 1, 1, 1, 116
+```
+
+| Cycle | |
+| --- | --- |
+| 17, 22, 26, 28, 32 | short failure runs of 4, 1, 1, 1, 1 — **recovered from every one** |
+| **33** | **a false fix is accepted** |
+| **34** | the blackout begins, **the very next cycle** |
+| 34–149 | 116 consecutive failures, to the end of the run |
+
+34 + 116 = 150: it never re-acquired. Before cycle 33 the system fell and got up
+five times; after cycle 33 it never got up.
+
+The mechanism is structural. The tile search is centred on the last accepted
+position, so a fix on the wrong ground moves the search window to the wrong
+ground, every candidate tile afterwards is drawn from the wrong place, and there
+is nothing left that can recover it.
 
 This is the same path dependence that made `max_candidate_tiles: 2` halve the
 lock rate while 91% of fixes came from rank 0, which had no explanation until
@@ -248,10 +265,13 @@ a doubtful fix is not one bad position but every position after it. A re-anchor
 path exists for exactly this (`docs/manual-reanchor.md`) and this is the
 strongest argument yet for keeping it reachable in flight.
 
-*Caveat on the ordering: the report records failure-run lengths but not the
-cycle index of the false fix, so "the false fix started the blackout" is
-inference from a co-occurrence in one run, not a measurement. Recording the
-cycle index would settle it and has not been done.*
+*Scope of the claim: this is one measured event, not a rate. It establishes that
+a false fix can end a flight's localization, and the structure of the tile
+search says why. It does not establish that every false fix does — that would
+need many runs with false fixes in them, and the only configuration found so
+far that produces any is one this document recommends against flying.
+`SimulationReport.blackouts_after_false_fix()` is the measurement, and its tests
+pin the negative cases so it can report `NOT supported`.*
 
 **There is an optimum, and it is not "as high as possible."** Error bottoms out
 at 240 m and then worsens: 0.18 m, 0.20 m, 0.25 m. Two effects pull against each
