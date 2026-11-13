@@ -63,7 +63,7 @@ TILE_PX = 1024
 MAX_BANK_DEG = 30.0
 
 
-def base_config(backend: str) -> Config:
+def base_config(backend: str, keypoints=None) -> Config:
     """The configuration the 56.7% measurement used, so results stay comparable."""
     config = Config()
     config.features.backend = backend
@@ -73,6 +73,8 @@ def base_config(backend: str) -> Config:
     else:
         config.superpoint.max_num_keypoints = 2048
         config.superpoint.resize_max_side = 768
+    if keypoints:
+        config.superpoint.max_num_keypoints = int(keypoints)
     config.superpoint.min_keypoints = 40
     config.lightglue.max_candidate_tiles = 4
     config.prewarp.enabled = True
@@ -165,8 +167,21 @@ def main() -> int:
     )
     parser.add_argument(
         "--only",
+        action="append",
         default=None,
-        help="comma-separated substrings; run only the variants that match",
+        help="substring of a variant label; repeat the flag to select several. "
+        "Not comma-separated: the labels themselves contain commas, and "
+        "splitting on them turned '240 m, 60 deg' into the fragment '60 deg', "
+        "which matches every 60 degree variant. The filter then silently "
+        "selected all of them.",
+    )
+    parser.add_argument(
+        "--keypoints",
+        type=int,
+        default=None,
+        help="keypoint budget per frame and per tile; lowering it makes the "
+        "task harder for every variant equally, which is how to get both "
+        "halves of the matched pair out from under the 100%% ceiling",
     )
     parser.add_argument("--out", default=None)
     args = parser.parse_args()
@@ -193,10 +208,12 @@ def main() -> int:
         # usable pair: both render every frame.
     ]
     if args.only:
-        wanted = [piece.strip() for piece in args.only.split(",") if piece.strip()]
+        wanted = [piece.strip() for piece in args.only if piece.strip()]
         variants = [v for v in variants if any(w in v[0] for w in wanted)]
         if not variants:
             raise SystemExit("--only matched no variants")
+        print("selected %d variant(s): %s"
+              % (len(variants), ", ".join(v[0] for v in variants)))
     check_geometry(variants, args.basemap_px, args.extent_m, MAX_BANK_DEG)
 
     workdir = os.path.join(
@@ -241,7 +258,7 @@ def main() -> int:
         )
         started = time.time()
         report = run_simulation(
-            config=base_config(args.backend),
+            config=base_config(args.backend, args.keypoints),
             label=label,
             basemap_px=args.basemap_px,
             basemap_gsd_mpp=TILE_GSD,

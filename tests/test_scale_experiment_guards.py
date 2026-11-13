@@ -153,3 +153,46 @@ class TestRectifiedGeometry:
         coarse = 240.0 / ((1280 / 2) / math.tan(math.radians(30.0)))
         assert fine == pytest.approx(coarse / 2)
         assert tool.footprint_m(240.0, 60.0) == pytest.approx(277.1, abs=0.5)
+
+
+class TestOnlyFilter:
+    """--only must not silently select more than it was asked for.
+
+    The first spelling split on commas, but the variant labels contain commas:
+    "240 m, 60 deg" became the fragments "240 m" and "60 deg", and that second
+    fragment matches *every* 60 degree variant. A run asked for three variants
+    quietly measured six, which cost twenty minutes and would have been read as
+    the requested comparison.
+    """
+
+    LABELS = [
+        "120 m, 60 deg (today)",
+        "180 m, 60 deg",
+        "240 m, 60 deg",
+        "300 m, 60 deg",
+        "360 m, 60 deg",
+        "120 m, 100 deg",
+    ]
+
+    def _select(self, wanted):
+        return [
+            label
+            for label in self.LABELS
+            if any(w.strip() in label for w in wanted if w.strip())
+        ]
+
+    def test_a_full_label_selects_exactly_one_variant(self):
+        assert self._select(["240 m, 60 deg"]) == ["240 m, 60 deg"]
+
+    def test_repeating_the_flag_selects_exactly_the_pair(self):
+        assert self._select(["240 m, 60 deg", "120 m, 100 deg"]) == [
+            "240 m, 60 deg",
+            "120 m, 100 deg",
+        ]
+
+    def test_the_comma_split_that_caused_the_over_selection(self):
+        """Documents the old behaviour so it is not reintroduced as a 'tidy-up'."""
+        broken = "240 m, 60 deg,120 m, 100 deg".split(",")
+        assert len(self._select(broken)) == len(self.LABELS), (
+            "splitting on commas selects every variant, which is the bug"
+        )
