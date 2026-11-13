@@ -76,6 +76,7 @@ effect.
 | [docs/flight-controller-compatibility.md](docs/flight-controller-compatibility.md) | **Read first.** Which boards can accept a visual position at all, and how to check yours |
 | [docs/matching-robustness.md](docs/matching-robustness.md) | Why frames are rectified before matching, and what it measures |
 | [docs/usb-camera.md](docs/usb-camera.md) | The three USB camera settings that fail silently on a Pi |
+| [docs/navigation-tiers.md](docs/navigation-tiers.md) | Map matching, then optical flow, then the autopilot's IMU — where each boundary is and why |
 | [docs/manual-reanchor.md](docs/manual-reanchor.md) | Clicking the map to say where to resume searching |
 | [docs/performance.md](docs/performance.md) | Measured latency, the speed/accuracy sweep, and why 2 Hz is not reachable yet |
 
