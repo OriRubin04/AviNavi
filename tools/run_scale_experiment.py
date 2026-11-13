@@ -60,6 +60,7 @@ from avinavi.sim.render import RenderSettings  # noqa: E402
 SENSOR_W, SENSOR_H = 1280, 720
 TILE_GSD = 0.5
 TILE_PX = 1024
+MAX_BANK_DEG = 30.0
 
 
 def base_config(backend: str) -> Config:
@@ -97,7 +98,7 @@ def rectified_px(height_m: float, fov_deg: float) -> int:
     return int(round(footprint_m(height_m, fov_deg) / TILE_GSD))
 
 
-def check_geometry(variants, basemap_px: int, extent_m: float) -> None:
+def check_geometry(variants, basemap_px: int, extent_m: float, max_bank_deg: float) -> None:
     """Refuse to run a variant that would look past the edge of the map.
 
     Two earlier experiments in this project produced confident, wrong numbers
@@ -121,6 +122,21 @@ def check_geometry(variants, basemap_px: int, extent_m: float) -> None:
                 "%s covers %.0f m of ground, more than one %.0f m tile, so the "
                 "frame cannot fall inside a single tile"
                 % (label, footprint_m(height, fov), tile_ground_m)
+            )
+        # A wide lens on a banking aircraft points its outer edge at the sky.
+        # At 120 degrees and 30 degrees of bank the edge sits exactly on the
+        # horizon, those frames cannot be rendered, and - this is the damaging
+        # part - the frames lost are the *banked* ones, which are the hardest.
+        # The variant then scores against an easier subset than every other
+        # variant and looks better than it is.  Measured: 134 of 152 frames.
+        edge_from_nadir = fov / 2.0 + max_bank_deg
+        if edge_from_nadir >= 85.0:
+            problems.append(
+                "%s puts the frame edge %.0f degrees from nadir at %.0f degrees "
+                "of bank, on or past the horizon. Those frames cannot render, "
+                "and the ones lost are the banked ones, so this variant would "
+                "be scored on an easier subset than the others"
+                % (label, edge_from_nadir, max_bank_deg)
             )
     if problems:
         raise SystemExit(
@@ -166,14 +182,22 @@ def main() -> int:
         ("300 m, 60 deg", 300.0, 60.0),
         ("360 m, 60 deg", 360.0, 60.0),
         ("120 m, 100 deg", 120.0, 100.0),
-        ("120 m, 120 deg", 120.0, 120.0),
+        # 120 m / 120 deg was the exact match for 360 m / 60 deg - both 831 px -
+        # and had to be dropped. At 120 degrees the frame edge reaches the
+        # horizon under 30 degrees of bank, so 18 of 152 frames did not render
+        # and the variant was scored on the unbanked subset. It returned 100%
+        # and 158 inliers, which looked like confirmation and was not.
+        # check_geometry now refuses it outright.
+        #
+        # 240 m / 60 deg against 120 m / 100 deg (554 px against 572 px) is the
+        # usable pair: both render every frame.
     ]
     if args.only:
         wanted = [piece.strip() for piece in args.only.split(",") if piece.strip()]
         variants = [v for v in variants if any(w in v[0] for w in wanted)]
         if not variants:
             raise SystemExit("--only matched no variants")
-    check_geometry(variants, args.basemap_px, args.extent_m)
+    check_geometry(variants, args.basemap_px, args.extent_m, MAX_BANK_DEG)
 
     workdir = os.path.join(
         os.environ.get("SCRATCH", "/tmp"), "avinavi_scale_%s" % args.backend
@@ -209,7 +233,7 @@ def main() -> int:
             extent_m=args.extent_m,
             airspeed_mps=22.0,
             cruise_height_m=height,
-            max_bank_deg=30.0,
+            max_bank_deg=MAX_BANK_DEG,
             wind_ned=(4.0, -3.0),
             duration_s=duration_s,
             dt_s=dt_s,
@@ -256,22 +280,42 @@ def main() -> int:
 
     # -- the prediction, stated before the numbers were seen ----------------
     print("\n=== the matched pair ===")
-    pair = [r for r in results if r["rectified_px"] == rectified_px(360.0, 60.0)]
+    short = [r for r in results if r["cycles"] < args.max_cycles]
+    for r in short:
+        print("  WARNING  %s completed only %d of %d cycles - frames that could "
+              "not be rendered are dropped silently, and the ones lost are the "
+              "banked ones, so this variant is NOT comparable with the others."
+              % (r["label"], r["cycles"], args.max_cycles))
+
+    pair = [r for r in results if r["label"].startswith(("240 m, 60", "120 m, 100"))]
     if len(pair) == 2:
         a, b = pair
-        gap = abs(a["lock_rate"] - b["lock_rate"]) * 100
-        print("  %s  ->  %.1f%%" % (a["label"], 100 * a["lock_rate"]))
-        print("  %s  ->  %.1f%%" % (b["label"], 100 * b["lock_rate"]))
-        print("  identical rectified size (%d px), threefold difference in altitude."
-              % a["rectified_px"])
+        if any(r in short for r in pair):
+            print("  the pair cannot be compared: see the warning above.")
+            return 0
+        print("  %-16s %4d px rectified -> %5.1f%% lock, %3d inliers, %s m"
+              % (a["label"], a["rectified_px"], 100 * a["lock_rate"],
+                 a["median_inliers"], a["report"]["position_error_m"]["median"]))
+        print("  %-16s %4d px rectified -> %5.1f%% lock, %3d inliers, %s m"
+              % (b["label"], b["rectified_px"], 100 * b["lock_rate"],
+                 b["median_inliers"], b["report"]["position_error_m"]["median"]))
+        print("  nearly equal rectified size, twofold difference in altitude.")
+
         if min(a["lock_rate"], b["lock_rate"]) > 0.97:
-            # Two numbers at the ceiling agree about nothing.  A test that
-            # cannot fail has not been passed, and reporting this as support
-            # would be the same error as the confounded bank experiment.
-            print("  BOTH AT THE CEILING - this comparison proves nothing. Re-run "
-                  "with --appearance 2.0 (or a shorter --max-cycles budget) so "
-                  "neither variant saturates.")
+            # Two lock rates at the ceiling agree about nothing, so fall back to
+            # the inlier count, which does not saturate (42 -> 79 -> 120 -> 141
+            # -> 152 across the altitude arm while lock sat at 100%).
+            spread = abs(a["median_inliers"] - b["median_inliers"])
+            scale = max(a["median_inliers"], b["median_inliers"], 1)
+            print("  lock rate is at the ceiling for both and settles nothing; "
+                  "comparing inliers instead, which do not saturate.")
+            print("  inliers differ by %d (%.0f%%) -> %s"
+                  % (spread, 100.0 * spread / scale,
+                     "consistent with rectified size being the driver"
+                     if spread <= 0.15 * scale
+                     else "NOT consistent; rectified size is not the whole story"))
         else:
+            gap = abs(a["lock_rate"] - b["lock_rate"]) * 100
             print("  gap: %.1f points -> %s" % (
                 gap,
                 "consistent with rectified size being the driver"
