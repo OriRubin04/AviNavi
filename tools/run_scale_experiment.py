@@ -140,6 +140,18 @@ def main() -> int:
     )
     parser.add_argument("--basemap-px", type=int, default=4000)
     parser.add_argument("--extent-m", type=float, default=600.0)
+    parser.add_argument(
+        "--appearance",
+        type=float,
+        default=1.0,
+        help="seasonal appearance gap between map and camera; 1.0 is the "
+        "standard run, higher is harder",
+    )
+    parser.add_argument(
+        "--only",
+        default=None,
+        help="comma-separated substrings; run only the variants that match",
+    )
     parser.add_argument("--out", default=None)
     args = parser.parse_args()
 
@@ -156,6 +168,11 @@ def main() -> int:
         ("120 m, 100 deg", 120.0, 100.0),
         ("120 m, 120 deg", 120.0, 120.0),
     ]
+    if args.only:
+        wanted = [piece.strip() for piece in args.only.split(",") if piece.strip()]
+        variants = [v for v in variants if any(w in v[0] for w in wanted)]
+        if not variants:
+            raise SystemExit("--only matched no variants")
     check_geometry(variants, args.basemap_px, args.extent_m)
 
     workdir = os.path.join(
@@ -211,6 +228,7 @@ def main() -> int:
             ),
             workdir=workdir,
             max_cycles=args.max_cycles,
+            appearance_strength=args.appearance,
             cache=cache,
         )
         data = report.as_dict()
@@ -246,12 +264,20 @@ def main() -> int:
         print("  %s  ->  %.1f%%" % (b["label"], 100 * b["lock_rate"]))
         print("  identical rectified size (%d px), threefold difference in altitude."
               % a["rectified_px"])
-        print("  gap: %.1f points -> %s" % (
-            gap,
-            "consistent with rectified size being the driver"
-            if gap < 10
-            else "NOT consistent; rectified size is not the whole story",
-        ))
+        if min(a["lock_rate"], b["lock_rate"]) > 0.97:
+            # Two numbers at the ceiling agree about nothing.  A test that
+            # cannot fail has not been passed, and reporting this as support
+            # would be the same error as the confounded bank experiment.
+            print("  BOTH AT THE CEILING - this comparison proves nothing. Re-run "
+                  "with --appearance 2.0 (or a shorter --max-cycles budget) so "
+                  "neither variant saturates.")
+        else:
+            print("  gap: %.1f points -> %s" % (
+                gap,
+                "consistent with rectified size being the driver"
+                if gap < 10
+                else "NOT consistent; rectified size is not the whole story",
+            ))
     else:
         print("  the matched pair is missing; the variant list was edited.")
 
