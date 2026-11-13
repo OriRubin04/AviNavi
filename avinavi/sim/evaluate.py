@@ -34,6 +34,7 @@ docstring.  The *comparisons* are what this harness is for.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import math
 import os
@@ -219,20 +220,64 @@ def _round(value, digits: int = 2):
 
 
 def _trajectory_fingerprint(trajectory: Sequence[TrajectoryPoint]) -> tuple:
-    """A cheap content-derived identity for a trajectory."""
+    """A cheap content-derived identity for a trajectory.
+
+    Height belongs in here and was once missing, which made an entire altitude
+    experiment meaningless: two circuits flown over the same ground at 120 m and
+    at 360 m have the same endpoints and the same headings, so they fingerprinted
+    identically and every variant was silently handed the *same rendered frames*.
+    Seven variants returned byte-identical results in zero seconds, which is the
+    only reason it was noticed.
+
+    The extremes are included as well as the endpoints, so a climb or a descent
+    between two trajectories that start and finish at the same altitude is not
+    mistaken for a repeat.
+    """
     if not trajectory:
         return (0,)
     first, last = trajectory[0], trajectory[-1]
+    heights = [point.height_m for point in trajectory]
     return (
         len(trajectory),
         round(first.north_m, 3),
         round(first.east_m, 3),
+        round(first.height_m, 3),
         round(first.yaw_rad, 6),
         round(last.north_m, 3),
         round(last.east_m, 3),
+        round(last.height_m, 3),
         round(last.yaw_rad, 6),
         round(last.time_s, 3),
+        round(min(heights), 3),
+        round(max(heights), 3),
     )
+
+
+def _render_fingerprint(render_settings) -> tuple:
+    """Identity of a camera for frame-cache purposes: every field, not a selection.
+
+    Hand-picking the fields that "matter" is what went wrong before - the key
+    listed ``width_px`` but not ``horizontal_fov_deg``, so changing the lens
+    reused frames shot through the old one.  ``RenderSettings`` is a dataclass,
+    so taking all of it cannot fall out of step when a field is added.
+    """
+    try:
+        return dataclasses.astuple(render_settings)
+    except TypeError:  # not a dataclass - fall back to identity
+        return (id(render_settings),)
+
+
+def _extrinsics_fingerprint(extrinsics_config) -> tuple:
+    """Identity of the camera mount, which the simulator renders through.
+
+    A mount rotation changes every pixel of every frame, and it was missing from
+    the frame-cache key for the same reason the field of view was: the key named
+    a few settings rather than all of them.
+    """
+    try:
+        return dataclasses.astuple(extrinsics_config)
+    except TypeError:
+        return (id(extrinsics_config),)
 
 
 def _bank_band(roll_rad: float) -> str:
@@ -477,9 +522,13 @@ def run_simulation(
     # that has been garbage collected can have its id reused, which would serve
     # frames rendered for a different flight path and produce a position error
     # that looks like a localization failure.
-    frames_key = ("frames", variant_key, _trajectory_fingerprint(trajectory),
-                  render_settings.seed, render_settings.width_px,
-                  render_settings.exposure_s)
+    frames_key = (
+        "frames",
+        variant_key,
+        _trajectory_fingerprint(trajectory),
+        _render_fingerprint(render_settings),
+        _extrinsics_fingerprint(config.camera_extrinsics),
+    )
     if frames_key not in cache:
         LOG.info("rendering %d frames", len(trajectory))
         rendered = []

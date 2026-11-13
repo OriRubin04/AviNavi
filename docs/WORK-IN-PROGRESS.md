@@ -262,11 +262,11 @@ Done since this plan was written: the odometry is wired into the runner
 
 ---
 
-## 5. Three bugs worth remembering, all of the same shape
+## 5. Four bugs worth remembering, all of the same shape
 
-Both produced a *confident, plausible, consistently wrong* answer with no error
+Each produced a *confident, plausible, consistently wrong* answer with no error
 anywhere. That is the failure mode this whole project is built to refuse, and
-both were caught only by checking numbers against arithmetic rather than
+each was caught only by checking numbers against arithmetic rather than
 trusting that a passing run meant a correct one.
 
 1. **A stale `index.json`** overrode the tiles' own georeferencing after a
@@ -290,7 +290,24 @@ trusting that a passing run meant a correct one.
    (`avinavi/features/resize.py`), and found by a test that asserted the
    override worked. It did not.
 
-The pattern across all three: **a passing run is not a correct one.** Each was
+4. **The simulation's frame cache ignored altitude and field of view.**
+   `_trajectory_fingerprint` summarised a trajectory by its endpoints and
+   headings but not its height, and the frame key listed `width_px` but not
+   `horizontal_fov_deg`. An altitude experiment with seven variants — 120 m to
+   360 m, three lenses — therefore shared **one** set of rendered frames between
+   all seven. Measured directly: the old key produced *1 distinct key for 7
+   variants*. The giveaway was that six of the seven returned byte-identical
+   lock rates, errors and inlier counts in zero seconds, which is impossible.
+   The extrinsics were missing from the key too, so any mount-angle experiment
+   would have failed the same way.
+
+   The fix is not "add height and FOV". The keys no longer name a *selection* of
+   settings at all: `RenderSettings` and the extrinsics config are dataclasses,
+   so the key is `dataclasses.astuple` of all their fields, and
+   `tests/test_sim_cache_keys.py` enumerates the dataclass so a field added
+   later cannot be silently excluded.
+
+The pattern across all four: **a passing run is not a correct one.** Each was
 caught by checking a number against arithmetic, or by asserting that a knob did
 what its name said — never by the code failing. Anything in this codebase that
 reports a measurement deserves the same suspicion.
