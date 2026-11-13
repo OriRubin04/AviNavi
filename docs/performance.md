@@ -137,9 +137,23 @@ away from the aircraft at a third of its true speed, confidently.
 
 In order of how much they are worth:
 
-**Fly higher — this is the largest single lever found so far, and it is free.**
-Measured over 150 cycles per altitude on one trajectory, one map and one
-camera, with every variant rendering all 150 frames:
+**Give the rectified frame more pixels. This is the largest lever found so far,
+and altitude is only one of three ways to pull it.**
+
+Rectification resamples the frame to the tile's ground sample distance, so the
+image SuperPoint actually sees is
+
+```
+rectified width = ground footprint / tile GSD
+```
+
+which depends on neither altitude nor sensor resolution directly. At 120 m
+behind a 60 degree lens against a 0.5 m/px map that is **277 px wide — from a
+1280 px sensor.** Ninety-five per cent of the pixels are discarded before any
+matching happens.
+
+Measured over 150 cycles per variant on one trajectory, one map and one camera,
+with every variant rendering all 150 frames:
 
 | Cruise | Rectified frame | Lock | Error p50 | Inliers |
 | --- | --- | --- | --- | --- |
@@ -153,12 +167,62 @@ Zero false fixes throughout. Going from 120 m to 240 m is a change to the
 flight plan, not to the code, the camera or the map, and it is worth **forty
 points of lock rate** while nearly tripling the inlier count.
 
-The reason is visible in the second column. Rectification resamples the frame to
-the tile's ground sample distance, so the image SuperPoint actually sees is
-`footprint / tile_gsd` on a side. At 120 m against a 0.5 m/px map that is 277 px
-wide — from a 1280 px sensor. Ninety-five per cent of the pixels are thrown away
-before any matching happens. Flying higher widens the footprint, so more of the
-sensor survives the warp.
+### It is the pixel count, not the altitude
+
+Altitude and rectified size move together in that table, so it does not separate
+them. This does.
+
+Starve the keypoint budget to 512 so nothing sits at the 100% ceiling, then
+compare three variants — one that shares *altitude* with the failure and
+*rectified size* with the success:
+
+| Variant | Altitude | Rectified | Lock | Inliers |
+| --- | --- | --- | --- | --- |
+| 120 m, 60 deg | 120 m | 277 px | **17.3%** | 29 |
+| 120 m, 100 deg | **120 m** | **572 px** | **100.0%** | 87 |
+| 240 m, 60 deg | 240 m | 554 px | 100.0% | 82 |
+
+The middle row flies at exactly the altitude of the 17.3% failure and scores
+100%, tracking its rectified-size twin (87 inliers against 82) rather than its
+altitude twin (29). The prediction was written before the run and could have
+come out the other way; it did not.
+
+**Altitude was never the cause. It is one way to widen the footprint.**
+
+### Three routes to the same place
+
+| Route | Cost | Ceiling |
+| --- | --- | --- |
+| Fly higher | free — a flight-plan change | past 240 m precision degrades (below) |
+| Wider lens | a lens | ~100 deg, set by the bank limit (below) |
+| Finer map | disk and build time | none found; **not measured** |
+
+The third is predicted by the formula and untested here: the simulator renders
+the camera from the same raster it tiles, so a finer map would also be a finer
+*world*, with terrain detail that does not exist at 0.5 m/px. That is a
+confound, not a measurement. The other two routes agreeing is the evidence for
+the formula; the third follows from it.
+
+As a rule of thumb from these runs: **below ~300 px rectified the system
+struggles, above ~550 px it works.**
+
+### The false-fix rate is not unconditionally zero
+
+Every variant in the first table reported 0.0% false fixes, and so has every
+run in `docs/matching-robustness.md`. That is not an unconditional property of
+the pipeline, and the starved run above is where it broke: **120 m at a 512
+keypoint budget produced 3.8% false fixes** — the first non-zero false-fix rate
+measured in this project.
+
+The mechanism is not mysterious. Geometric verification needs enough correct
+correspondences to outvote the wrong ones; with 29 inliers on a 277 px image
+that margin is thin enough for RANSAC to settle on a consensus that is merely
+self-consistent. Every variant at 550 px or more stayed at 0.0%.
+
+So "no fake positions" holds where matches are plentiful and degrades where they
+are scarce — which is a third, independent argument for the same change, and a
+reason to treat `geometry.min_inliers` as a floor that should rise, not fall, if
+the rectified frame is small.
 
 **There is an optimum, and it is not "as high as possible."** Error bottoms out
 at 240 m and then worsens: 0.18 m, 0.20 m, 0.25 m. Two effects pull against each
@@ -166,13 +230,7 @@ other — more inliers stabilise the solve, while a coarser live GSD (0.108 m/px
 at 120 m, 0.325 m/px at 360 m) makes every pixel of matching error worth three
 times as many metres. Below 240 m the first wins; above it the second does.
 
-**A wider lens buys the same thing without the altitude — up to a limit.**
-120 m with a 100 degree lens covers 286 m of ground and rectifies to 572 px,
-near-identical to 240 m with a 60 degree lens at 554 px. They measured 125
-inliers at 0.17 m against 120 inliers at 0.18 m: a twofold difference in
-altitude for a 4% difference in result.
-
-The limit is hard and geometric. At 120 degrees the frame edge sits 60 degrees
+**The lens route has a hard geometric limit.** At 120 degrees the frame edge sits 60 degrees
 from nadir, so at 30 degrees of bank it reaches the horizon and those frames
 cannot be rendered at all. In the air that is not a dropped frame, it is a frame
 with sky in it. **Keep `half the field of view + the bank limit` below about 80
