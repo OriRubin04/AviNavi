@@ -189,6 +189,14 @@ come out the other way; it did not.
 
 **Altitude was never the cause. It is one way to widen the footprint.**
 
+Read that 17.3% carefully, though — it is not a uniformly hard run. Its failure
+runs were `[116, 4, 1, 1, 1, 1]`: **one blackout of 116 consecutive cycles**
+accounts for 116 of the 124 failures. The two wide-footprint variants recorded
+no failure runs at all, `count: 0`. So the honest statement is not "small
+rectified frames score lower", it is **"small rectified frames can lose the
+thread completely and not get it back"** — which is worse, and is the subject of
+the next section.
+
 ### Three routes to the same place
 
 | Route | Cost | Ceiling |
@@ -223,6 +231,27 @@ So "no fake positions" holds where matches are plentiful and degrades where they
 are scarce — which is a third, independent argument for the same change, and a
 reason to treat `geometry.min_inliers` as a floor that should rise, not fall, if
 the rectified frame is small.
+
+**And a false fix does not cost one bad position.** The same run that produced
+the 3.8% also produced the 116-cycle blackout, and the two are almost certainly
+the same event: the tile search is centred on the last accepted position, so a
+fix on the wrong ground moves the search window to the wrong ground, every
+subsequent candidate tile is wrong, and nothing can re-acquire. Six failure
+runs, one of them 116 long; the other five are 4, 1, 1, 1 and 1 — ordinary hard
+frames.
+
+This is the same path dependence that made `max_candidate_tiles: 2` halve the
+lock rate while 91% of fixes came from rank 0, which had no explanation until
+now. It raises the stakes on the confidence gate considerably: **a single false
+fix can blind the system for the rest of the flight**, so the cost of accepting
+a doubtful fix is not one bad position but every position after it. A re-anchor
+path exists for exactly this (`docs/manual-reanchor.md`) and this is the
+strongest argument yet for keeping it reachable in flight.
+
+*Caveat on the ordering: the report records failure-run lengths but not the
+cycle index of the false fix, so "the false fix started the blackout" is
+inference from a co-occurrence in one run, not a measurement. Recording the
+cycle index would settle it and has not been done.*
 
 **There is an optimum, and it is not "as high as possible."** Error bottoms out
 at 240 m and then worsens: 0.18 m, 0.20 m, 0.25 m. Two effects pull against each
