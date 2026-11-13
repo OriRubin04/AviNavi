@@ -102,12 +102,47 @@ class SimulationReport:
     #: lost the thread and cannot re-acquire).  Only the second is a recovery
     #: problem, and only the second is fixed by widening the candidate list.
     failure_runs: List[int] = field(default_factory=list)
+    #: Cycle index of every false fix, and the cycle each failure run began at.
+    #: Lengths alone cannot answer the question that matters about a blackout:
+    #: *what started it*.  One run showed a single false fix and a 116-cycle
+    #: run of failures out of 150, and the obvious reading - the search window
+    #: follows the last accepted fix, so a fix on the wrong ground poisons every
+    #: candidate after it - was only ever inference from a co-occurrence,
+    #: because nothing recorded when either happened.  With both indices it is a
+    #: measurement: see :meth:`blackouts_after_false_fix`.
+    false_fix_cycles: List[int] = field(default_factory=list)
+    failure_run_starts: List[int] = field(default_factory=list)
     trajectory: Dict = field(default_factory=dict)
     settings: Dict = field(default_factory=dict)
 
     @property
     def lock_rate(self) -> float:
         return self.valid_fixes / self.cycles if self.cycles else 0.0
+
+    def blackouts_after_false_fix(self, gap: int = 1) -> List[Tuple[int, int, int]]:
+        """Failure runs that began within ``gap`` cycles of a false fix.
+
+        Returns ``(false_fix_cycle, run_start_cycle, run_length)`` for each.
+
+        This exists to test one specific claim: that the tile search, being
+        centred on the last accepted position, cannot recover once it accepts a
+        position on the wrong ground - every candidate tile afterwards is drawn
+        from the wrong place.  If that is right, a blackout should begin on the
+        cycle immediately after a false fix, not at a random point in the run.
+
+        A false fix followed by nothing, or a long failure run with no false fix
+        before it, both count against the claim.  The default ``gap`` of 1 means
+        "the very next cycle"; widen it only with a reason.
+        """
+        if not self.false_fix_cycles or not self.failure_run_starts:
+            return []
+        lengths = dict(zip(self.failure_run_starts, self.failure_runs))
+        found = []
+        for cycle in self.false_fix_cycles:
+            for start in self.failure_run_starts:
+                if cycle < start <= cycle + gap:
+                    found.append((cycle, start, lengths.get(start, 0)))
+        return found
 
     @property
     def false_fix_rate(self) -> float:
@@ -205,7 +240,14 @@ class SimulationReport:
                     else 0
                 ),
                 "lengths": sorted(self.failure_runs, reverse=True)[:10],
+                "starts": list(self.failure_run_starts[:10]),
             },
+            "false_fix_cycles": list(self.false_fix_cycles[:20]),
+            # (false fix cycle, blackout start, blackout length) for every
+            # failure run that began on the cycle after a false fix.
+            "blackouts_after_false_fix": [
+                list(item) for item in self.blackouts_after_false_fix()
+            ],
             "winning_candidate_rank": {
                 str(rank): self.candidate_ranks.count(rank)
                 for rank in sorted(set(self.candidate_ranks))
@@ -617,6 +659,7 @@ def run_simulation(
                 )
             if error > false_fix_threshold_m:
                 report.false_fixes += 1
+                report.false_fix_cycles.append(int(index))
                 # A false fix is worse than no fix: log it loudly so a run that
                 # looks good on lock rate cannot hide one.
                 LOG.warning(
@@ -638,6 +681,8 @@ def run_simulation(
             )
             report.failure_reasons[reason] = report.failure_reasons.get(reason, 0) + 1
             report.by_bank[band] = (good, total + 1)
+            if current_failure_run == 0:
+                report.failure_run_starts.append(int(index))
             current_failure_run += 1
 
         # Separation: how many inliers does the *wrong* tile attract?  Sampled
