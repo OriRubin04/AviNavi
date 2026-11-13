@@ -256,7 +256,11 @@ def test_dead_reckoning_stops_at_the_configured_limit(runner):
     assert len(expired) == 1, "the expiry should be announced exactly once"
     assert results[-1].valid is False
     assert results[-1].reason == InvalidReason.TOO_FEW_MATCHES
-    assert runner.reckoner.active is False
+    assert runner.reckoner.publishable is False
+    # Accumulation deliberately outlives publication: the tile search still
+    # needs to know the aircraft has moved. See _steer_search_with_flow.
+    assert runner.reckoner.active is True
+    assert runner.reckoner.guides_search is True
 
 
 def test_a_later_map_fix_revives_dead_reckoning_after_expiry(runner):
@@ -266,7 +270,7 @@ def test_a_later_map_fix_revives_dead_reckoning_after_expiry(runner):
         runner._apply_dead_reckoning(
             failed_fix(timestamp=index * 0.1), StubFrame(index * 0.1)
         )
-    assert runner.reckoner.active is False
+    assert runner.reckoner.publishable is False
 
     runner._apply_dead_reckoning(map_fix(timestamp=3.0), StubFrame(3.0))
     result = runner._apply_dead_reckoning(failed_fix(timestamp=3.1), StubFrame(3.1))

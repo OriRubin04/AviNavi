@@ -100,6 +100,9 @@ class Runner:
         #: localization thread starts and reads it, so it needs a lock.
         self._reckoner_lock = threading.Lock()
         self._reckoning_just_expired = False
+        #: The EKF origin, kept so dead-reckoned NED can be turned back into a
+        #: geographic point for steering the tile search.
+        self._origin: Optional[LocalOrigin] = None
         #: True when odometry runs on its own thread.  False for a replay
         #: source, where the localization loop must do the tracking instead -
         #: see :meth:`_odometry_loop`.
@@ -138,6 +141,7 @@ class Runner:
             self._setup_mavlink()
 
         origin, start = self._acquire_initial_position()
+        self._origin = origin
         self.engine.initialize(origin, start)
         # GPS_INPUT carries absolute lat/lon, so that publisher needs the origin
         # to convert the local NED solution back out.  ODOMETRY does not: it is
@@ -419,6 +423,10 @@ class Runner:
             # with its own predecessor's success.
             self.monitor.record_fix(fix)
             fix = self._apply_dead_reckoning(fix, frame)
+            if not fix.valid:
+                # Keep the search window on the aircraft rather than on the
+                # last fix, so the next frame looks in the right place.
+                self._steer_search_with_flow()
 
             accepted, reason = self.safety.observe(fix)
             if accepted:
@@ -536,12 +544,52 @@ class Runner:
 
         with self._reckoner_lock:
             if not self.reckoner.active:
-                # Nothing to reckon from yet, or it has already expired.
+                # Nothing to reckon from yet.
                 return False
-            if not self.reckoner.accumulate(delta):
+            was_publishable = self.reckoner.publishable
+            publishable = self.reckoner.accumulate(delta)
+            if was_publishable and not publishable:
+                # The crossing, announced once. Accumulation continues past it
+                # so the tile search keeps following the aircraft.
                 self._reckoning_just_expired = True
-                return False
-        return True
+            return publishable
+
+    def _steer_search_with_flow(self) -> None:
+        """Move the tile search to where optical flow says the aircraft is.
+
+        This is what lets the system re-acquire without being told. The search
+        window is centred on the last accepted position; during a dropout the
+        aircraft keeps flying, so without this the window stays where the last
+        fix put it - 66 m behind after 3 s at 22 m/s, 440 m after 20 - and the
+        widening radius searches around a point the aircraft has left.
+
+        It runs past the publishing budget on purpose. The displacement is far
+        too drifted to navigate on by then and still much better than nothing
+        for aiming: 5% of 440 m is about 22 m of error against a radius already
+        measured in hundreds.
+
+        What it cannot do is correct a *wrong* centre. Flow measures motion,
+        not position, so if the last accepted fix was on the wrong ground this
+        faithfully carries that error along. Escaping that depends on the
+        radius growing until it covers the truth, or on an operator re-anchor -
+        which is why the re-anchor path stays.
+        """
+        if self._origin is None or self.engine is None:
+            return
+        guidance = self.config.visual_odometry
+        if guidance.max_search_guidance_s <= 0.0:
+            return
+        with self._reckoner_lock:
+            if self._last_map_fix is None or not self.reckoner.guides_search:
+                return
+            north, east = self.reckoner.offset_ned_m
+            base = self._last_map_fix.position_ned
+        if base is None or math.hypot(north, east) < guidance.search_guidance_min_move_m:
+            return
+        guided = self._origin.to_geo(
+            NEDPosition(base.north_m + north, base.east_m + east, base.down_m)
+        )
+        self.engine.guide_search_center(guided)
 
     def _apply_dead_reckoning(self, fix: VisualFix, frame=None) -> VisualFix:
         """Carry the solution across a map-matching dropout.
@@ -581,14 +629,20 @@ class Runner:
             # map matching reported.
             self._reckoning_just_expired = False
             self._notify(
-                "AviNavi: dead reckoning expired after %.0f m; no position"
-                % self.reckoner.distance_m,
+                "AviNavi: no reliable position for %.1f s (%.0f m flown); "
+                "transmission stopped. Optical flow keeps steering the tile "
+                "search, so the system may re-acquire on its own; re-anchor if "
+                "it does not."
+                % (
+                    self.config.visual_odometry.max_dead_reckoning_s,
+                    self.reckoner.distance_m,
+                ),
                 warning=True,
             )
             return replace(fix, reason=InvalidReason.DEAD_RECKONING_EXPIRED)
 
         with self._reckoner_lock:
-            if self._last_map_fix is None or not self.reckoner.active:
+            if self._last_map_fix is None or not self.reckoner.publishable:
                 return fix
             if self.reckoner.distance_m <= 0.0:
                 # Reckoning is live but the odometry has not produced anything
@@ -672,6 +726,14 @@ class Runner:
         moved = (
             haversine_distance_m(previous, request.geo) if previous is not None else None
         )
+        # This is the only thing that releases the hold.  An operator clicking
+        # the map is the one source of position information that does not come
+        # through the poisoned search window, which is why nothing else is
+        # allowed to clear it.
+        with self._reckoner_lock:
+            self.reckoner.clear()
+            self._last_map_fix = None
+            self._reckoning_just_expired = False
         self.engine.reanchor(request.geo, request.radius_m)
         # Any propagated pose still in flight was derived from the old area, so
         # it must not survive the move.

@@ -279,9 +279,34 @@ visual_odometry:
   enabled: true
   max_points: 400
   min_points: 60
-  max_dead_reckoning_s: 10.0     # then stop, rather than publish fiction
   drift_fraction: 0.05           # 5 m of assumed error per 100 m flown
   resize_max_side: 480
+
+  # Optical flow does two jobs with very different accuracy requirements, and
+  # they get separate budgets because conflating them stopped the system from
+  # ever recovering on its own.
+  #
+  # 1. PUBLISHING a position to the autopilot needs metre-level accuracy, and
+  #    5%-of-distance drift destroys that within seconds. At the measured ~0.8
+  #    localization attempts per second, 3 s is a budget of about two and a
+  #    half tries. After it, nothing is sent: ArduPilot's own EKF3 coasts on
+  #    its IMU, which is the third and last fallback.
+  max_dead_reckoning_s: 3.0
+  #
+  # 2. STEERING THE TILE SEARCH only needs to be better than the search window
+  #    is wide. After 20 s and 440 m the drift is about 22 m - useless to
+  #    navigate on, an excellent search centre when the radius is already
+  #    hundreds of metres. Before this was separated, the accumulator froze at
+  #    the publishing budget, so the window stayed where the last fix put it
+  #    while the aircraft flew on at 22 m/s and the growing radius searched
+  #    around a point it had left.
+  #
+  #    This is what lets the system re-acquire unaided. It cannot correct a
+  #    *wrong* centre - flow measures motion, not position, so a false fix is
+  #    carried faithfully along - which is why the manual re-anchor stays.
+  #    Set to 0 to disable guidance.
+  max_search_guidance_s: 60.0
+  search_guidance_min_move_m: 15.0
 
 # ---------------------------------------------------------------------------
 # Manual re-anchor: the operator clicks the map to say where to search next.

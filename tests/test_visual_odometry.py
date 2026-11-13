@@ -435,8 +435,8 @@ def test_the_uncertainty_never_shrinks_below_the_starting_fix():
     assert reckoner.sigma_m >= 4.0
 
 
-def test_reckoning_stops_at_the_time_limit():
-    """Past this it is actively harmful, so it produces nothing."""
+def test_publishing_stops_at_the_time_limit():
+    """Past this it is actively harmful to navigate on, so it is not published."""
     reckoner = DeadReckoner(max_dead_reckoning_s=1.0)
     reckoner.start(base_sigma_m=2.0)
     accepted = 0
@@ -444,7 +444,62 @@ def test_reckoning_stops_at_the_time_limit():
         if reckoner.accumulate(delta(dt_s=0.1)):
             accepted += 1
     assert accepted == 10
-    assert reckoner.active is False
+    assert reckoner.publishable is False
+    assert reckoner.expired is True
+
+
+def test_accumulation_outlives_the_publishing_limit():
+    """The displacement keeps growing, because the tile search still needs it.
+
+    These are two jobs with different accuracy requirements. Publishing a
+    position needs metres; aiming a search window only needs to beat the width
+    of the window. Previously one limit governed both, so the accumulator froze
+    and the search window stayed where the last fix put it while the aircraft
+    flew on - the reason the system could not re-acquire unaided.
+    """
+    reckoner = DeadReckoner(max_dead_reckoning_s=1.0, max_search_guidance_s=60.0)
+    reckoner.start(base_sigma_m=2.0)
+    for _ in range(10):
+        reckoner.accumulate(delta(dt_s=0.1, north=5.0))
+    at_limit, _ = reckoner.offset_ned_m
+    for _ in range(20):
+        reckoner.accumulate(delta(dt_s=0.1, north=5.0))
+    after_limit, _ = reckoner.offset_ned_m
+
+    assert reckoner.publishable is False, "it must not be published"
+    assert reckoner.guides_search is True, "but it must still steer the search"
+    assert after_limit > at_limit, "and the displacement must keep growing"
+    assert after_limit == pytest.approx(at_limit * 3, rel=0.01)
+
+
+def test_guidance_has_its_own_limit():
+    reckoner = DeadReckoner(max_dead_reckoning_s=1.0, max_search_guidance_s=2.0)
+    reckoner.start(base_sigma_m=2.0)
+    for _ in range(15):
+        reckoner.accumulate(delta(dt_s=0.1))
+    assert reckoner.guides_search is True
+    for _ in range(10):
+        reckoner.accumulate(delta(dt_s=0.1))
+    assert reckoner.guides_search is False
+
+
+def test_guidance_can_be_disabled():
+    reckoner = DeadReckoner(max_dead_reckoning_s=1.0, max_search_guidance_s=0.0)
+    reckoner.start(base_sigma_m=2.0)
+    reckoner.accumulate(delta(dt_s=0.1))
+    assert reckoner.guides_search is False
+
+
+def test_clearing_resets_the_expiry():
+    """A re-anchor or a new fix must not inherit the old expired state."""
+    reckoner = DeadReckoner(max_dead_reckoning_s=1.0)
+    reckoner.start(base_sigma_m=2.0)
+    for _ in range(30):
+        reckoner.accumulate(delta(dt_s=0.1))
+    assert reckoner.expired is True
+    reckoner.start(base_sigma_m=1.0)
+    assert reckoner.expired is False
+    assert reckoner.publishable is True
 
 
 def test_a_new_fix_restarts_the_reckoning_from_zero():

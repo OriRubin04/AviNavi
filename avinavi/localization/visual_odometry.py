@@ -426,21 +426,25 @@ class DeadReckoner:
         self,
         drift_fraction: float = 0.05,
         max_dead_reckoning_s: float = 10.0,
+        max_search_guidance_s: float = 60.0,
     ) -> None:
         self.drift_fraction = float(drift_fraction)
         self.max_dead_reckoning_s = float(max_dead_reckoning_s)
+        self.max_search_guidance_s = float(max_search_guidance_s)
         self._north_m = 0.0
         self._east_m = 0.0
         self._distance_m = 0.0
         self._elapsed_s = 0.0
         self._base_sigma_m = 0.0
         self._active = False
+        self._expired = False
 
     @classmethod
     def from_config(cls, config) -> "DeadReckoner":
         return cls(
             drift_fraction=config.drift_fraction,
             max_dead_reckoning_s=config.max_dead_reckoning_s,
+            max_search_guidance_s=getattr(config, "max_search_guidance_s", 60.0),
         )
 
     def start(self, base_sigma_m: float) -> None:
@@ -451,17 +455,48 @@ class DeadReckoner:
         self._elapsed_s = 0.0
         self._base_sigma_m = max(0.0, float(base_sigma_m))
         self._active = True
+        self._expired = False
 
     def clear(self) -> None:
         self._active = False
+        self._expired = False
 
     @property
     def active(self) -> bool:
+        """Has a map fix to reckon from, whether or not it may be published."""
         return self._active
 
     @property
     def expired(self) -> bool:
-        return self._active and self._elapsed_s > self.max_dead_reckoning_s
+        """Past the publishing budget."""
+        return self._active and self._expired
+
+    @property
+    def publishable(self) -> bool:
+        """May the accumulated position be sent to the autopilot?
+
+        Separate from :attr:`active` because the accumulation outlives the
+        publishing budget by design - see :attr:`guides_search`.
+        """
+        return self._active and not self._expired
+
+    @property
+    def guides_search(self) -> bool:
+        """May the accumulated displacement still steer the tile search?
+
+        This is the distinction that lets the system recover on its own. The
+        displacement stops being good enough to *navigate* on long before it
+        stops being the best available guess at *where to look*, and the two
+        were previously governed by one limit: the accumulator froze at the
+        publishing budget, so the search window stayed at the last fix while
+        the aircraft flew on at 22 m/s. The radius grew, around a point the
+        aircraft had left.
+        """
+        return (
+            self._active
+            and self.max_search_guidance_s > 0.0
+            and self._elapsed_s <= self.max_search_guidance_s
+        )
 
     @property
     def offset_ned_m(self) -> Tuple[float, float]:
@@ -488,21 +523,28 @@ class DeadReckoner:
         return math.hypot(self._base_sigma_m, drift)
 
     def accumulate(self, delta: OdometryDelta) -> bool:
-        """Add one delta.  Returns False once the limit is passed."""
+        """Add one delta.  Returns False once the publishing budget is passed.
+
+        Accumulation continues past that point, because the displacement is
+        still the best guess at where the aircraft is for the purpose of
+        aiming the tile search - see :attr:`guides_search`. What stops at the
+        budget is *publishing*, which is what the return value reports.
+        """
         if not self._active:
             return False
         self._elapsed_s += delta.dt_s
-        if self._elapsed_s > self.max_dead_reckoning_s:
-            LOG.warning(
-                "dead reckoning has run %.1f s (limit %.1f s) and %.0f m without a "
-                "map fix; stopping rather than publishing an unjustifiable position",
-                self._elapsed_s,
-                self.max_dead_reckoning_s,
-                self._distance_m,
-            )
-            self._active = False
-            return False
         self._north_m += delta.north_m
         self._east_m += delta.east_m
         self._distance_m += delta.distance_m
-        return True
+        if not self._expired and self._elapsed_s > self.max_dead_reckoning_s:
+            LOG.warning(
+                "dead reckoning has run %.1f s (limit %.1f s) and %.0f m without a "
+                "map fix; no longer publishing a position, but still steering the "
+                "tile search with it for up to %.0f s",
+                self._elapsed_s,
+                self.max_dead_reckoning_s,
+                self._distance_m,
+                self.max_search_guidance_s,
+            )
+            self._expired = True
+        return not self._expired

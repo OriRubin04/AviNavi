@@ -244,6 +244,21 @@ class LocalizationEngine:
         self.extractor.warmup()
         self.matcher.warmup()
 
+    def guide_search_center(self, geo: GeoPoint) -> None:
+        """Move the search window to follow a dead-reckoned estimate.
+
+        Deliberately *not* :meth:`reanchor`. A re-anchor is an operator saying
+        "look here", which resets the failure count and the radius because it
+        is new information. This is the aircraft saying "I have moved", which
+        is not new information about where the ground is - so the failure count
+        and the grown radius must both survive, or every guidance update would
+        shrink the window back and undo the widening that the dropout earned.
+
+        Without this the window stayed where the last fix put it while the
+        aircraft flew on, so the radius grew around a point it had left.
+        """
+        self._search_center = geo
+
     def reanchor(self, geo: GeoPoint, radius_m: Optional[float] = None) -> None:
         """Move the tile search to an operator-supplied point.
 

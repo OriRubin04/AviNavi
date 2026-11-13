@@ -111,8 +111,30 @@ class VisualOdometryConfig:
     max_points: int = 400
     #: Re-detect when fewer than this many points survive.
     min_points: int = 60
-    #: Give up dead reckoning after this long without a map fix.
-    max_dead_reckoning_s: float = 10.0
+    #: Give up dead reckoning after this long without a map fix.  At the
+    #: measured ~0.8 attempts per second this is a budget of attempts as much
+    #: as of seconds: 3 s is about two and a half tries.
+    max_dead_reckoning_s: float = 3.0
+    #: Keep using optical flow to *steer the tile search* after the publishing
+    #: budget above has run out, for up to this long.
+    #:
+    #: These are two different jobs with two different accuracy requirements,
+    #: and conflating them is why the system could not recover on its own.
+    #: Publishing a position to the autopilot needs metre-level accuracy, which
+    #: 5%-of-distance drift destroys within seconds. *Aiming a search window*
+    #: needs only to be better than the window is wide: after 20 s and 440 m
+    #: the drift is about 22 m, useless to navigate on and an excellent search
+    #: centre when the radius is already hundreds of metres.
+    #:
+    #: Before this existed the accumulator stopped dead at the publishing
+    #: budget, so the search window froze at the last fix while the aircraft
+    #: flew on at 22 m/s - 66 m of error after 3 s, 440 m after 20 - and the
+    #: growing radius was searching around a point the aircraft had left.
+    #:
+    #: Set to 0 to disable guidance and restore the old behaviour.
+    max_search_guidance_s: float = 60.0
+    #: Don't bother moving the search centre for less than this.
+    search_guidance_min_move_m: float = 15.0
     #: Assumed 1-sigma drift as a fraction of distance travelled.  Used to grow
     #: the reported uncertainty; 0.05 means 5 m of error per 100 m flown.
     drift_fraction: float = 0.05
