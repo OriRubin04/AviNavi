@@ -61,10 +61,37 @@ camera:
   distortion: []                 # [k1, k2, p1, p2, k3]
   replay_speed: 1.0
 
+  # -- USB (V4L2) camera settings. See docs/usb-camera.md. ------------------
+  # All three of these fail QUIETLY if left alone: the camera works, the bench
+  # looks fine, and the match rate in the air is poor for reasons that never
+  # appear in a log.
+  #
+  # Uncompressed YUYV at 1280x720x30 needs ~442 Mbit/s, more than USB 2.0
+  # delivers, so the camera silently serves fewer frames or a smaller size -
+  # which invalidates the intrinsics above. Check with:
+  #   v4l2-ctl --list-formats-ext -d /dev/video0
+  fourcc: MJPG                   # "" leaves the driver default
+  # Auto-exposure over varying terrain reaches for a long shutter, and
+  # SuperPoint does not detect smeared corners. At 22 m/s and 0.13 m/px,
+  # 1/60 s smears a feature across ~2.8 px; 1/500 s keeps it within 0.3 px.
+  lock_exposure: true
+  max_exposure_s: 0.002          # 1/500 s
+  gain: null                     # null leaves it to the camera; raising gain
+                                 # is the honest price of a short shutter.
+  # V4L2 commonly queues four buffers and ignores CAP_PROP_BUFFERSIZE, so a
+  # 2 Hz loop would read a frame ~0.5 s - eleven metres - out of date.
+  drain_to_newest: true
+  max_frame_age_s: 0.25
+  warmup_frames: 5               # discarded while auto-gain settles
+
 # ---------------------------------------------------------------------------
 # Camera -> body (FRD) extrinsics.
-# Identity = downward-facing camera whose image +X points along body +Y (right)
-# and image +Y points along body -X (aft). See docs/coordinate-frames.md.
+# Identity = downward-facing camera whose image +X points along body +X (the
+# nose) and image +Y points along body +Y (the right wing); i.e. the nose
+# appears at the RIGHT edge of the frame. See docs/coordinate-frames.md for the
+# four common mountings and their yaw_deg. Getting this wrong by 90 degrees
+# produces a yaw bias the EKF fights rather than rejects, so check it against a
+# real frame before the first flight.
 # ---------------------------------------------------------------------------
 camera_extrinsics:
   rotation:
@@ -81,9 +108,68 @@ camera_extrinsics:
 # ---------------------------------------------------------------------------
 rates:
   camera_fps: 30.0
-  visual_localization_hz: 5.0    # benchmark your Pi before raising this
+  # 2 Hz is what a Pi 5 sustains with SuperPoint+LightGlue on CPU at
+  # resize_max_side 640. Benchmark with `avinavi bench` before raising it; a
+  # requested rate the Pi cannot meet silently becomes a lower actual rate.
+  visual_localization_hz: 2.0
+  # Frame-to-frame odometry. NOT tied to visual_localization_hz, and not a
+  # performance knob: Lucas-Kanade needs consecutive frames to overlap, and it
+  # was measured to track at a 0.5 s spacing (11 m at 22 m/s, 92% overlap) and
+  # to fail outright at 1.0 s (22 m, 84% overlap). Map matching with the
+  # learned backend runs at well under 1 Hz, so tracking between localization
+  # frames would produce nothing at all. See docs/performance.md.
+  visual_odometry_hz: 5.0
   mavlink_odometry_hz: 20.0
   diagnostics_hz: 1.0
+
+# ---------------------------------------------------------------------------
+# Feature backend
+# ---------------------------------------------------------------------------
+features:
+  # superpoint: SuperPoint + LightGlue (needs torch).
+  # opencv:     SIFT/AKAZE/ORB + Lowe ratio test. No torch, useful as a
+  #             fallback and as the measurement baseline.
+  backend: superpoint
+  detector: sift                 # opencv backend only: sift | akaze | orb
+  ratio: 0.8                     # opencv backend only: Lowe's ratio
+
+# ---------------------------------------------------------------------------
+# Frame rectification to a synthetic nadir, north-up, tile-GSD view.
+#
+# NOT an optimisation. SuperPoint carries no orientation and LightGlue was
+# trained on pairs within about +/-31.5 degrees, while 10 degrees of bank at
+# 120 m already skews the ground sample distance 1.5x across the frame and
+# ArduPlane permits 45. Without this, a fixed wing loses lock in every turn.
+# See avinavi/localization/prewarp.py and docs/matching-robustness.md.
+# ---------------------------------------------------------------------------
+prewarp:
+  enabled: true
+  max_output_side: 768           # caps the warp cost on a Pi
+  max_tilt_deg: 55.0             # beyond this the warp is mostly extrapolation
+  min_valid_fraction: 0.25
+  footprint_margin: 1.05
+  require_attitude: true         # a stale attitude warps worse than not warping
+  max_attitude_age_s: 0.5
+  fallback_to_raw: true          # try the raw frame rather than skip the cycle
+
+# ---------------------------------------------------------------------------
+# Photometric normalisation (CLAHE) to bridge the camera/basemap appearance
+# gap. Must be applied to BOTH sides: build the tile database with
+# `avinavi extract-features --normalize` if this is enabled here.
+# ---------------------------------------------------------------------------
+photometric:
+  enabled: true
+  clip_limit: 2.0
+  tile_grid: 8
+  denoise_sigma: 0.0             # 0 disables the blur
+
+# ---------------------------------------------------------------------------
+# Gates that skip a cycle rather than risk a confidently wrong match.
+# ---------------------------------------------------------------------------
+quality:
+  sharpness_gate_enabled: true
+  min_sharpness_ratio: 0.45      # relative to the running median
+  max_bank_deg: 35.0             # 0 disables the gate
 
 # ---------------------------------------------------------------------------
 # SuperPoint (live frames only - tile features are precomputed offline)
@@ -158,6 +244,20 @@ map:
   database_path: map_database
   terrain_alt_m: 0.0
   feature_cache_size: 64
+  # Tile features are built offline and compared against live frames in the
+  # air, with nothing but this configuration connecting the two. When it drifts
+  # the failure is silent: the system boots, the camera streams, and there are
+  # simply no matches. So the builder stamps every tile with what produced its
+  # features, and startup refuses to continue when they cannot be compared at
+  # all (a different backend, detector or descriptor width).
+  #
+  # Differences that only cost match quality are always reported and never
+  # fatal - the offline path deliberately uses a larger keypoint budget and the
+  # full tile resolution, and grounding a correct setup would be worse than the
+  # problem it prevents.
+  #
+  # Leave this on. Turn it off only to inspect a mismatched database on purpose.
+  verify_extractor: true
 
 # ---------------------------------------------------------------------------
 # Pose propagation between visual fixes (never repeats a stale pose forever)
@@ -171,16 +271,122 @@ propagation:
   sigma_growth_mps: 2.0
 
 # ---------------------------------------------------------------------------
+# Frame-to-frame visual odometry: dead reckoning across a map-matching dropout
+# (cloud shadow, water, a hole in the basemap) instead of going silent at
+# 22 m/s. Drift is reported honestly as a growing position sigma.
+# ---------------------------------------------------------------------------
+visual_odometry:
+  enabled: true
+  max_points: 400
+  min_points: 60
+  drift_fraction: 0.05           # 5 m of assumed error per 100 m flown
+  resize_max_side: 480
+
+  # Optical flow does two jobs with very different accuracy requirements, and
+  # they get separate budgets because conflating them stopped the system from
+  # ever recovering on its own.
+  #
+  # 1. PUBLISHING a position to the autopilot needs metre-level accuracy, and
+  #    5%-of-distance drift destroys that within seconds. At the measured ~0.8
+  #    localization attempts per second, 3 s is a budget of about two and a
+  #    half tries. After it, nothing is sent: ArduPilot's own EKF3 coasts on
+  #    its IMU, which is the third and last fallback.
+  max_dead_reckoning_s: 3.0
+  #
+  # 2. STEERING THE TILE SEARCH only needs to be better than the search window
+  #    is wide. After 20 s and 440 m the drift is about 22 m - useless to
+  #    navigate on, an excellent search centre when the radius is already
+  #    hundreds of metres. Before this was separated, the accumulator froze at
+  #    the publishing budget, so the window stayed where the last fix put it
+  #    while the aircraft flew on at 22 m/s and the growing radius searched
+  #    around a point it had left.
+  #
+  #    This is what lets the system re-acquire unaided. It cannot correct a
+  #    *wrong* centre - flow measures motion, not position, so a false fix is
+  #    carried faithfully along - which is why the manual re-anchor stays.
+  #    Set to 0 to disable guidance.
+  max_search_guidance_s: 60.0
+  search_guidance_min_move_m: 15.0
+
+  # What actually bounds flying on optical flow: uncertainty in METRES, not a
+  # stopwatch. Flow navigation is a legitimate mode, not a few seconds' grace.
+  # So long as the drift is reported honestly, ArduPilot's EKF weights the
+  # measurement by the accuracy it is given - a 20 m-sigma position is useful,
+  # a 300 m one is correctly ignored. What was never safe was misreporting it.
+  # At the 5% drift above, 50 m is reached after about 1 km of flight.
+  max_position_sigma_m: 50.0
+
+  # Speed assumed for stretches where optical flow produced NOTHING, so that a
+  # failure of flow cannot hide. This fixed a measured bug of the worst kind:
+  # when flow failed it returned nothing, so the offset froze, the elapsed time
+  # froze with it (it was a sum of flow's own timestamps), every limit built on
+  # that time stopped applying, and the system published the same position with
+  # the same 3 m sigma and a fresh timestamp indefinitely - while the aircraft
+  # flew away at 22 m/s. After a minute: 1320 m of error reported as 3 m.
+  #
+  # Seconds nobody observed are seconds the aircraft could have flown anywhere
+  # up to its own speed, so they enter the uncertainty at that rate. A second
+  # of silence costs 40 m of sigma, so the gate above closes on its own and the
+  # system hands over to the autopilot's IMU - the third and last fallback.
+  unobserved_speed_mps: 40.0
+
+# ---------------------------------------------------------------------------
+# Manual re-anchor: the operator clicks the map to say where to search next.
+# Changes only the SEARCH WINDOW; it is not a position fix, and the next frame
+# still has to earn its match. See docs/manual-reanchor.md.
+# ---------------------------------------------------------------------------
+reanchor:
+  enabled: true
+  # Recommended channel: COMMAND_INT / MAV_CMD_SPATIAL_USER_1 (31005) addressed
+  # to this component. No side effects on the aircraft, and we ACK it so the
+  # operator sees the click land. Needs tools/mission_planner_plugin/.
+  accept_spatial_user: true
+  # Overhear "Set EKF Origin Here". The only stock Mission Planner map action
+  # that reaches a Pi on its own UART (SET_GPS_GLOBAL_ORIGIN has no
+  # target_component, so ArduPilot's router forwards it). ArduPilot rejects the
+  # origin change itself once the origin is set, so it is a no-op on the plane.
+  # Requires the Pi's system_id to equal the autopilot's.
+  accept_set_origin: true
+  # Overhear "Point Camera Here" (DO_SET_ROI). Only arrives when the Pi is the
+  # telemetry hub; a navigation no-op on a gimbal-less plane. No ACK.
+  accept_roi: true
+  # "Set Home Here" reaches every link, but it MOVES THE RTL POINT. Off.
+  accept_home_position: false
+  radius_m: 1500.0               # search radius for the first attempt after
+  min_move_m: 25.0               # ignore home re-sends on arming
+  control_socket_host: ""        # UDP control endpoint; empty disables it.
+  control_socket_port: 14555     # anything reaching this port can redirect the
+                                 # search, so keep it on localhost.
+
+# ---------------------------------------------------------------------------
 # External navigation output
+#
+# gps_input is the DEFAULT because it is the only interface a custom
+# MatekF405-Wing build can expose with a single feature flag (GPS Drivers ->
+# MAV, then GPS1_TYPE=14). A stock F405-Wing ArduPlane build has ODOMETRY,
+# VISION_POSITION_ESTIMATE *and* GPS_INPUT all compiled out, and every failure
+# is silent. Check that VISO_TYPE exists in your full parameter list before
+# choosing odometry. See docs/flight-controller-compatibility.md.
 # ---------------------------------------------------------------------------
 output:
-  message: odometry              # odometry | vision_position_estimate | none
+  message: gps_input             # gps_input | odometry | vision_position_estimate | none
   # SAFETY: transmission is opt-in. Start every new airframe at false and only
   # enable after the bench checks in docs/safety-and-testing.md pass.
   send_to_autopilot: false
   send_velocity: true
   send_quality: true
   timestamp_source: unix         # unix | boot
+  # GPS_INPUT specifics. gps_id MUST equal the GPS instance index that
+  # GPS1_TYPE=14 creates (0 for GPS1); AP_GPS_MAV ignores any other value.
+  gps_input_id: 0
+  # EK3_GPS_CHECK requires 6 satellites by default, so anything below 6 is
+  # rejected before the EKF ever sees the position. Validation enforces this.
+  gps_input_satellites: 12
+  gps_input_hdop: 0.9
+  gps_input_vdop: 1.3
+  # Visual yaw as GPS yaw. Only useful with EK3_SRC1_YAW=2 (GPS); leave false
+  # unless you have verified the camera extrinsics yaw against a real frame.
+  gps_input_send_yaw: false
 
 # ---------------------------------------------------------------------------
 # Logging

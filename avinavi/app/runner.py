@@ -34,23 +34,34 @@ import logging
 import math
 import threading
 import time
-from typing import Optional
+from dataclasses import replace
+from typing import Optional, Union
 
 from ..camera import CameraError, create_camera
 from ..config import Config
 from ..diagnostics.logging_setup import SolutionLogger
 from ..diagnostics.monitor import DiagnosticsMonitor
 from ..geo import LocalOrigin, haversine_distance_m
+from ..frames import CameraExtrinsics
 from ..localization.engine import LocalizationEngine
 from ..localization.propagator import PosePropagator
-from ..mapdb.database import MapCoverageError, MapDatabase
+from ..localization.visual_odometry import DeadReckoner, FrameToFrameOdometry
+from ..mapdb.database import ExtractorMismatchError, MapCoverageError, MapDatabase
 from ..mavlink.connection import MavlinkConnection, MavlinkConnectionError
 from ..mavlink.external_navigation import ExternalNavigationPublisher
+from ..mavlink.gps_input import GpsInputPublisher
 from ..mavlink.initial_position import InitialPositionError, InitialPositionProvider
-from ..types import GeoPoint, InvalidReason, VisualFix
+from ..mavlink.reanchor import ReanchorListener, ReanchorRequest
+from ..types import GeoPoint, InvalidReason, NEDPosition, VisualFix
 from .safety import SafetyGate
 
 LOG = logging.getLogger(__name__)
+
+
+#: The two output paths present the same interface to the runner: ``publish``,
+#: ``publish_failure``, ``enabled``, ``message`` and the three counters.  Which
+#: one is built depends on ``output.message``; see :meth:`Runner._build_publisher`.
+Publisher = Union[ExternalNavigationPublisher, GpsInputPublisher]
 
 
 class RunnerError(RuntimeError):
@@ -73,8 +84,37 @@ class Runner:
         self.engine: Optional[LocalizationEngine] = None
         self.camera = None
         self.connection: Optional[MavlinkConnection] = None
-        self.publisher: Optional[ExternalNavigationPublisher] = None
+        self.publisher: Optional[Publisher] = None
         self.initial_position: Optional[InitialPositionProvider] = None
+        self.reanchor_listener: Optional[ReanchorListener] = None
+
+        extrinsics = CameraExtrinsics.from_config(config.camera_extrinsics)
+        self.odometry = FrameToFrameOdometry.from_config(
+            config.camera, extrinsics, config.visual_odometry
+        )
+        self.reckoner = DeadReckoner.from_config(config.visual_odometry)
+        #: The last fix that came from actually matching the map.  Dead
+        #: reckoning is always expressed as an offset from this.
+        self._last_map_fix: Optional[VisualFix] = None
+        #: The odometry thread accumulates into the reckoner while the
+        #: localization thread starts and reads it, so it needs a lock.
+        self._reckoner_lock = threading.Lock()
+        self._reckoning_just_expired = False
+        #: Was the reckoned position publishable on the previous cycle?  The
+        #: publishing limit is a sigma in metres, and sigma grows with time
+        #: nobody observed, so the limit can be crossed on a cycle where the
+        #: odometry contributed nothing - which means the crossing has to be
+        #: noticed here rather than only where deltas are accumulated.
+        self._was_publishable = False
+        #: "Optical flow has stopped producing anything" announced once.
+        self._flow_loss_reported = False
+        #: The EKF origin, kept so dead-reckoned NED can be turned back into a
+        #: geographic point for steering the tile search.
+        self._origin: Optional[LocalOrigin] = None
+        #: True when odometry runs on its own thread.  False for a replay
+        #: source, where the localization loop must do the tracking instead -
+        #: see :meth:`_odometry_loop`.
+        self._odometry_threaded = False
 
         self._stop = threading.Event()
         self._threads = []
@@ -103,12 +143,19 @@ class Runner:
             ) from exc
 
         self.engine = LocalizationEngine(self.config, self.database)
+        self._verify_extractor()
 
         if self.uses_mavlink:
             self._setup_mavlink()
 
         origin, start = self._acquire_initial_position()
+        self._origin = origin
         self.engine.initialize(origin, start)
+        # GPS_INPUT carries absolute lat/lon, so that publisher needs the origin
+        # to convert the local NED solution back out.  ODOMETRY does not: it is
+        # already expressed in the local frame the autopilot holds.
+        if isinstance(self.publisher, GpsInputPublisher):
+            self.publisher.set_origin(origin)
 
         self.camera = create_camera(self.config.camera)
         try:
@@ -132,9 +179,7 @@ class Runner:
         except MavlinkConnectionError as exc:
             raise RunnerError(str(exc)) from exc
 
-        self.publisher = ExternalNavigationPublisher.from_config(
-            self.connection, self.config.output
-        )
+        self.publisher = self._build_publisher()
         if self.publisher.enabled:
             LOG.warning(
                 "external navigation TRANSMISSION IS ENABLED (%s). Confirm the "
@@ -146,6 +191,56 @@ class Runner:
                 "external navigation transmission is disabled; computing and "
                 "logging only (output.send_to_autopilot = false)"
             )
+
+        if self.config.reanchor.enabled:
+            self.reanchor_listener = ReanchorListener.from_config(
+                self.config.reanchor, self.connection
+            )
+            self.reanchor_listener.start()
+
+    def _build_publisher(self) -> Publisher:
+        """Pick the output path named by ``output.message``.
+
+        ``GPS_INPUT`` and the two external-navigation messages are handled by
+        different ArduPilot subsystems with different compile-time gates, so
+        this is not a cosmetic choice: on a 1 MB board such as the
+        MatekF405-Wing, a stock ArduPlane build has *all three* compiled out and
+        every one of them fails silently.  See
+        ``docs/flight-controller-compatibility.md``.
+        """
+        if self.config.output.message == "gps_input":
+            return GpsInputPublisher.from_config(self.connection, self.config.output)
+        return ExternalNavigationPublisher.from_config(
+            self.connection, self.config.output
+        )
+
+    def _verify_extractor(self) -> None:
+        """Check the tiles were built by something this run can match against.
+
+        Done here, before MAVLink, before the camera and before the operator is
+        asked for a position, because it needs none of them and because the
+        failure it catches is otherwise invisible: a database built with one
+        detector and flown with another produces no matches at all, with a clean
+        log and a healthy-looking video stream.
+
+        The comparison uses the engine's **actual** extractor rather than a
+        second reading of the configuration, so there is no mirror of
+        ``_build_extractor`` here to fall out of step with it.
+        """
+        assert self.database is not None and self.engine is not None
+        fingerprint = getattr(self.engine.extractor, "fingerprint", None)
+        if fingerprint is None:
+            LOG.warning(
+                "%s exposes no fingerprint; skipping the map compatibility check",
+                type(self.engine.extractor).__name__,
+            )
+            return
+        try:
+            self.database.verify_extractor(
+                fingerprint, strict=self.config.map.verify_extractor
+            )
+        except ExtractorMismatchError as exc:
+            raise RunnerError(str(exc)) from exc
 
     def _acquire_initial_position(self):
         """Get the origin, and the tile-search seed, before anything else runs."""
@@ -225,6 +320,13 @@ class Runner:
                 daemon=True,
             )
         ]
+        if self._should_thread_odometry():
+            self._odometry_threaded = True
+            self._threads.append(
+                threading.Thread(
+                    target=self._odometry_loop, name="odometry", daemon=True
+                )
+            )
         if self.uses_mavlink:
             self._threads.append(
                 threading.Thread(target=self._output_loop, name="output", daemon=True)
@@ -277,6 +379,9 @@ class Runner:
             except Exception:  # pragma: no cover - best-effort teardown
                 LOG.debug("error closing the camera", exc_info=True)
             self.camera = None
+        if self.reanchor_listener is not None:
+            self.reanchor_listener.stop()
+            self.reanchor_listener = None
         if self.connection is not None:
             self.connection.close()
             self.connection = None
@@ -305,6 +410,8 @@ class Runner:
             # does not permanently shift the phase - but never build up a backlog.
             next_cycle = max(next_cycle + interval, now + interval * 0.25)
 
+            self._apply_pending_reanchor()
+
             try:
                 frame = self.camera.read()
             except CameraError as exc:
@@ -319,7 +426,15 @@ class Runner:
             self._last_frame_sequence = frame.sequence
 
             fix = self._localize(frame)
+            # Only a real map match counts toward the lock rate; a
+            # dead-reckoned position would otherwise flatter the statistics
+            # with its own predecessor's success.
             self.monitor.record_fix(fix)
+            fix = self._apply_dead_reckoning(fix, frame)
+            if not fix.valid:
+                # Keep the search window on the aircraft rather than on the
+                # last fix, so the next frame looks in the right place.
+                self._steer_search_with_flow()
 
             accepted, reason = self.safety.observe(fix)
             if accepted:
@@ -341,30 +456,349 @@ class Runner:
                 self._frames_exhausted.set()
                 return
 
-    def _localize(self, frame) -> VisualFix:
-        """Run one cycle, feeding in autopilot attitude/height when available."""
-        roll = pitch = 0.0
-        height_hint = None
-        if self.connection is not None:
-            state = self.connection.state
-            # Only trust attitude that is actually fresh; stale angles are worse
-            # than assuming level flight.
-            if state.attitude_age() < 0.5 and state.roll_rad is not None:
-                roll = state.roll_rad
-                pitch = state.pitch_rad
-            if state.height_age() < 1.0 and state.height_above_origin_m is not None:
-                origin = self.engine.origin
-                terrain = self.config.map.terrain_alt_m
-                if origin is not None:
-                    height_hint = (
-                        origin.alt_m + state.height_above_origin_m - terrain
+    def _should_thread_odometry(self) -> bool:
+        """Does the odometry get its own thread?
+
+        Not for a ``directory`` replay source. Two threads pulling from one
+        replay would consume images twice and desynchronise the run, and it is
+        unnecessary there anyway: consecutive images in a directory *are*
+        consecutive frames, so tracking inside the localization loop is both
+        safe and correct.
+        """
+        if not self.config.visual_odometry.enabled or not self.odometry.available:
+            return False
+        if (self.config.camera.source or "").lower() == "directory":
+            return False
+        return self.config.rates.visual_odometry_hz > 0
+
+    def _odometry_loop(self) -> None:
+        """Track the ground between map fixes, on its own schedule.
+
+        This runs far faster than the localization loop, and that is the whole
+        point — see :meth:`track_frame`. It reads the camera concurrently with
+        the localization loop, which is safe for a live source because the
+        capture thread always hands over the newest frame; both consumers
+        occasionally seeing the same frame is harmless, and a repeated frame
+        yields a zero delta rather than a wrong one.
+        """
+        interval = 1.0 / self.config.rates.visual_odometry_hz
+        next_cycle = time.monotonic()
+        failures = 0
+
+        while not self._stop.is_set():
+            now = time.monotonic()
+            if now < next_cycle:
+                self._stop.wait(min(next_cycle - now, 0.02))
+                continue
+            next_cycle = max(next_cycle + interval, now + interval * 0.25)
+
+            if self.camera is None:
+                return
+            try:
+                frame = self.camera.read()
+            except CameraError:
+                # The localization loop reports camera faults and shuts the run
+                # down; this thread just stops contributing.
+                return
+            if frame is None:
+                continue
+
+            if not self.track_frame(frame):
+                failures += 1
+                if failures == 40:
+                    LOG.warning(
+                        "frame-to-frame odometry has produced no estimate for "
+                        "%d consecutive frames. Dead reckoning cannot cover a "
+                        "map dropout in this state - check the height source, "
+                        "and that rates.visual_odometry_hz is high enough that "
+                        "consecutive frames still overlap.",
+                        failures,
                     )
+            else:
+                failures = 0
+
+    def track_frame(self, frame) -> bool:
+        """Feed one frame to the frame-to-frame odometry.
+
+        Called from :meth:`_odometry_loop` at ``rates.visual_odometry_hz``,
+        which is **deliberately not** the localization rate. Lucas-Kanade needs
+        consecutive frames to overlap heavily, and it was measured to succeed at
+        a 0.5 s spacing (11 m at 22 m/s, 92% frame overlap) and to fail outright
+        at 1.0 s (22 m, 84% overlap). Since map matching runs at well under 1 Hz
+        with the learned backend, tracking between *localization* frames would
+        produce nothing at all — the feature would be present and inert exactly
+        when it is needed.
+
+        Returns True when a delta was accumulated.
+        """
+        if not self.config.visual_odometry.enabled or not self.odometry.available:
+            return False
+
+        roll, pitch, yaw = self._attitude()
+        try:
+            delta = self.odometry.update(
+                frame.image,
+                timestamp_monotonic=frame.timestamp_monotonic,
+                height_m=self._height_hint(),
+                roll_rad=roll,
+                pitch_rad=pitch,
+                yaw_rad=yaw or 0.0,
+            )
+        except Exception:
+            LOG.exception("visual odometry raised; continuing without it")
+            return False
+        if delta is None:
+            return False
+
+        with self._reckoner_lock:
+            if not self.reckoner.active:
+                # Nothing to reckon from yet.
+                return False
+            # The publishable -> not transition is detected in
+            # _apply_dead_reckoning instead, because the limit is a sigma that
+            # can be crossed on a cycle where no delta arrived at all.
+            # Accumulation continues past it so the search keeps following the
+            # aircraft.
+            return self.reckoner.accumulate(delta)
+
+    def _steer_search_with_flow(self) -> None:
+        """Move the tile search to where optical flow says the aircraft is.
+
+        This is what lets the system re-acquire without being told. The search
+        window is centred on the last accepted position; during a dropout the
+        aircraft keeps flying, so without this the window stays where the last
+        fix put it - 66 m behind after 3 s at 22 m/s, 440 m after 20 - and the
+        widening radius searches around a point the aircraft has left.
+
+        It runs past the publishing budget on purpose. The displacement is far
+        too drifted to navigate on by then and still much better than nothing
+        for aiming: 5% of 440 m is about 22 m of error against a radius already
+        measured in hundreds.
+
+        What it cannot do is correct a *wrong* centre. Flow measures motion,
+        not position, so if the last accepted fix was on the wrong ground this
+        faithfully carries that error along. Escaping that depends on the
+        radius growing until it covers the truth, or on an operator re-anchor -
+        which is why the re-anchor path stays.
+        """
+        if self._origin is None or self.engine is None:
+            return
+        guidance = self.config.visual_odometry
+        if guidance.max_search_guidance_s <= 0.0:
+            return
+        with self._reckoner_lock:
+            if self._last_map_fix is None or not self.reckoner.guides_search:
+                return
+            north, east = self.reckoner.offset_ned_m
+            base = self._last_map_fix.position_ned
+        if base is None or math.hypot(north, east) < guidance.search_guidance_min_move_m:
+            return
+        guided = self._origin.to_geo(
+            NEDPosition(base.north_m + north, base.east_m + east, base.down_m)
+        )
+        self.engine.guide_search_center(guided)
+
+    def _apply_dead_reckoning(self, fix: VisualFix, frame=None) -> VisualFix:
+        """Carry the solution across a map-matching dropout.
+
+        Consumes whatever :meth:`track_frame` has accumulated since the last map
+        fix; it does not run the odometry itself.
+
+        A dead-reckoned fix is returned as ``valid`` because it is a genuine
+        estimate, but it carries ``dead_reckoned=True`` and a sigma grown by the
+        distance flown, so everything downstream can tell the difference. It is
+        bounded twice: by ``max_dead_reckoning_s``, after which this produces
+        nothing at all, and by the safety gate, which still applies.
+        """
+        if not self.config.visual_odometry.enabled or not self.odometry.available:
+            return fix
+
+        # In replay mode there is no separate odometry thread - see
+        # _odometry_loop - so the localization loop does the tracking, which is
+        # correct there because consecutive images in a directory *are*
+        # consecutive frames.
+        if frame is not None and not self._odometry_threaded:
+            self.track_frame(frame)
+
+        if fix.valid and fix.position_ned is not None:
+            # A map fix resets the drift: dead reckoning is always relative to
+            # the most recent real match.
+            self._last_map_fix = fix
+            sigma = fix.position_sigma_m
+            with self._reckoner_lock:
+                self.reckoner.start(0.0 if math.isnan(sigma) else sigma)
+                self._reckoning_just_expired = False
+                self._was_publishable = True
+                self._flow_loss_reported = False
+            return fix
+
+        with self._reckoner_lock:
+            publishable = self.reckoner.publishable
+            if self._was_publishable and not publishable:
+                self._reckoning_just_expired = True
+            self._was_publishable = publishable
+
+        # Flow failing is a different event from flow drifting, and the operator
+        # needs them apart: drifting too far is the system working as designed,
+        # while "the camera can no longer see the ground move" means nothing but
+        # the autopilot's own IMU remains.  Checked before the drift branch
+        # because it is the more serious of the two.
+        if self.reckoner.flow_lost and not self._flow_loss_reported:
+            self._flow_loss_reported = True
+            self._notify(
+                "AviNavi: optical flow has produced nothing for %.1f s - no "
+                "visual position of any kind. Handing over to the autopilot's "
+                "inertial estimate; re-anchor on the map to recover."
+                % self.reckoner.unobserved_s,
+                warning=True,
+            )
+
+        if self._reckoning_just_expired:
+            # Say why once, so the log distinguishes "could not match" from
+            # "stopped guessing"; afterwards the honest reason is whatever the
+            # map matching reported.
+            self._reckoning_just_expired = False
+            self._notify(
+                "AviNavi: position uncertainty passed %.0f m after %.0f m flown "
+                "on optical flow; transmission stopped. Flow keeps steering the "
+                "tile search, so the system may re-acquire on its own; "
+                "re-anchor if it does not."
+                % (
+                    self.config.visual_odometry.max_position_sigma_m,
+                    self.reckoner.distance_m,
+                ),
+                warning=True,
+            )
+            return replace(fix, reason=InvalidReason.DEAD_RECKONING_EXPIRED)
+
+        with self._reckoner_lock:
+            if self._last_map_fix is None or not self.reckoner.publishable:
+                return fix
+            if self.reckoner.distance_m <= 0.0:
+                # Reckoning is live but the odometry has not produced anything
+                # yet: no information, which is not the same as no movement.
+                return fix
+        return self._dead_reckoned_fix(fix)
+
+    def _dead_reckoned_fix(self, failed: VisualFix) -> VisualFix:
+        """Build a position from the last map fix plus the accumulated offset."""
+        base = self._last_map_fix
+        origin = self.engine.origin
+        if base is None or base.position_ned is None or origin is None:
+            return failed
+
+        north_offset, east_offset = self.reckoner.offset_ned_m
+        position = NEDPosition(
+            base.position_ned.north_m + north_offset,
+            base.position_ned.east_m + east_offset,
+            base.position_ned.down_m,
+        )
+        sigma = self.reckoner.sigma_m
+        return VisualFix(
+            timestamp_monotonic=failed.timestamp_monotonic,
+            timestamp_unix=failed.timestamp_unix,
+            valid=True,
+            reason=InvalidReason.NONE,
+            geo=origin.to_geo(position),
+            position_ned=position,
+            velocity_ned=base.velocity_ned,
+            attitude=base.attitude,
+            # Yaw is not observed by dead reckoning; carrying the old one
+            # forward would misrepresent it as fresh.
+            yaw_rad=None,
+            quality=base.quality,
+            tile_id=base.tile_id,
+            candidate_tiles=0,
+            ground_resolution_mpp=base.ground_resolution_mpp,
+            processing_time_s=failed.processing_time_s,
+            position_sigma_m=sigma,
+            yaw_sigma_rad=base.yaw_sigma_rad,
+            dead_reckoned=True,
+            dead_reckoning_s=self.reckoner.elapsed_s,
+        )
+
+    def _attitude(self):
+        """``(roll, pitch, yaw)`` from the autopilot, or level flight."""
+        if self.connection is None:
+            return (0.0, 0.0, None)
+        state = self.connection.state
+        if state.attitude_age() < 0.5 and state.roll_rad is not None:
+            return (state.roll_rad, state.pitch_rad, state.yaw_rad)
+        return (0.0, 0.0, None)
+
+    def _height_hint(self) -> Optional[float]:
+        """Height above the mapped terrain, from the autopilot where fresh."""
+        if self.connection is None:
+            return None
+        state = self.connection.state
+        if state.height_age() >= 1.0 or state.height_above_origin_m is None:
+            return None
+        origin = self.engine.origin
+        if origin is None:
+            return None
+        return origin.alt_m + state.height_above_origin_m - self.config.map.terrain_alt_m
+
+    def _apply_pending_reanchor(self) -> None:
+        """Move the search window if the operator clicked the map.
+
+        This only changes *where the next frame looks*.  It is deliberately not
+        a position fix: the frame still has to earn its match, and until it
+        does, nothing is published.  A click is therefore always safe, including
+        mid-flight with transmission enabled.
+        """
+        if self.reanchor_listener is None:
+            return
+        request: Optional[ReanchorRequest] = self.reanchor_listener.take()
+        if request is None:
+            return
+
+        previous = self.engine.search_center
+        moved = (
+            haversine_distance_m(previous, request.geo) if previous is not None else None
+        )
+        # This is the only thing that releases the hold.  An operator clicking
+        # the map is the one source of position information that does not come
+        # through the poisoned search window, which is why nothing else is
+        # allowed to clear it.
+        with self._reckoner_lock:
+            self.reckoner.clear()
+            self._last_map_fix = None
+            self._reckoning_just_expired = False
+        self.engine.reanchor(request.geo, request.radius_m)
+        # Any propagated pose still in flight was derived from the old area, so
+        # it must not survive the move.
+        self.propagator.clear()
+        self.safety.reset()
+
+        self._notify(
+            "re-anchored to %.6f, %.6f (r=%.0f m, via %s%s)"
+            % (
+                request.geo.lat_deg,
+                request.geo.lon_deg,
+                self.engine.search_radius_m,
+                request.source,
+                "" if moved is None else ", %.0f m from the last search centre" % moved,
+            )
+        )
+
+    def _localize(self, frame) -> VisualFix:
+        """Run one cycle, feeding in autopilot attitude/height when available.
+
+        Only attitude that is actually fresh is used; stale angles are worse
+        than assuming level flight. Yaw is passed separately from roll and
+        pitch because it steers the north-up rectification and seeds the
+        yaw-bias estimator, and unlike the other two there is no safe default,
+        so ``None`` means "do not assume".
+        """
+        roll, pitch, yaw = self._attitude()
+        height_hint = self._height_hint()
 
         try:
             return self.engine.localize(
                 frame.image,
                 roll_rad=roll,
                 pitch_rad=pitch,
+                yaw_rad=yaw,
                 height_hint_m=height_hint,
                 timestamp_unix=frame.timestamp_unix,
             )
