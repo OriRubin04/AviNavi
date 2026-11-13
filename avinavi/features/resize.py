@@ -29,6 +29,8 @@ With the sentinel the two meanings are distinct:
 
 from __future__ import annotations
 
+from typing import Optional
+
 
 class _UseConfiguredResize:
     """A distinct type so the sentinel is recognisable in a traceback."""
@@ -39,3 +41,25 @@ class _UseConfiguredResize:
 
 #: Default for every ``resize_max_side`` parameter.  See the module docstring.
 USE_CONFIGURED_RESIZE = _UseConfiguredResize()
+
+
+def resolve_max_side(configured: Optional[int], requested) -> Optional[int]:
+    """Apply the sentinel rule: omitted means "use ``configured``".
+
+    One definition, used by both feature backends and by the builder when it
+    records what resolution a tile was described at.  Re-deriving the rule at
+    each call site is how the two meanings collapsed in the first place.
+    """
+    return configured if requested is USE_CONFIGURED_RESIZE else requested
+
+
+def analysis_max_side(image_max_side: int, max_side: Optional[int]) -> int:
+    """The longest side a detector actually sees for this image.
+
+    Both backends downscale only, never up, so an image already smaller than
+    ``max_side`` is passed through untouched.
+    """
+    image_max_side = int(image_max_side)
+    if not max_side or max_side <= 0:
+        return image_max_side
+    return min(image_max_side, int(max_side))

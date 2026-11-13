@@ -46,7 +46,7 @@ from ..frames import CameraExtrinsics
 from ..localization.engine import LocalizationEngine
 from ..localization.propagator import PosePropagator
 from ..localization.visual_odometry import DeadReckoner, FrameToFrameOdometry
-from ..mapdb.database import MapCoverageError, MapDatabase
+from ..mapdb.database import ExtractorMismatchError, MapCoverageError, MapDatabase
 from ..mavlink.connection import MavlinkConnection, MavlinkConnectionError
 from ..mavlink.external_navigation import ExternalNavigationPublisher
 from ..mavlink.gps_input import GpsInputPublisher
@@ -132,6 +132,7 @@ class Runner:
             ) from exc
 
         self.engine = LocalizationEngine(self.config, self.database)
+        self._verify_extractor()
 
         if self.uses_mavlink:
             self._setup_mavlink()
@@ -200,6 +201,34 @@ class Runner:
         return ExternalNavigationPublisher.from_config(
             self.connection, self.config.output
         )
+
+    def _verify_extractor(self) -> None:
+        """Check the tiles were built by something this run can match against.
+
+        Done here, before MAVLink, before the camera and before the operator is
+        asked for a position, because it needs none of them and because the
+        failure it catches is otherwise invisible: a database built with one
+        detector and flown with another produces no matches at all, with a clean
+        log and a healthy-looking video stream.
+
+        The comparison uses the engine's **actual** extractor rather than a
+        second reading of the configuration, so there is no mirror of
+        ``_build_extractor`` here to fall out of step with it.
+        """
+        assert self.database is not None and self.engine is not None
+        fingerprint = getattr(self.engine.extractor, "fingerprint", None)
+        if fingerprint is None:
+            LOG.warning(
+                "%s exposes no fingerprint; skipping the map compatibility check",
+                type(self.engine.extractor).__name__,
+            )
+            return
+        try:
+            self.database.verify_extractor(
+                fingerprint, strict=self.config.map.verify_extractor
+            )
+        except ExtractorMismatchError as exc:
+            raise RunnerError(str(exc)) from exc
 
     def _acquire_initial_position(self):
         """Get the origin, and the tile-search seed, before anything else runs."""

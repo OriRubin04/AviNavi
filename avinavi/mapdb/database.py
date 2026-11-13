@@ -22,6 +22,14 @@ LOG = logging.getLogger(__name__)
 INDEX_FILENAME = "index.json"
 
 
+class ExtractorMismatchError(RuntimeError):
+    """The tiles' features cannot be compared against the configured extractor.
+
+    Raised on the ground, at startup, in place of a flight that would have
+    streamed happily and never produced a single match.
+    """
+
+
 class MapCoverageError(RuntimeError):
     """No tile covers the requested area - a map coverage failure."""
 
@@ -224,6 +232,70 @@ class MapDatabase:
         east = max(t.bounds.east for t in self._tiles.values())
         north = max(t.bounds.north for t in self._tiles.values())
         return BoundingBox(west, south, east, north)
+
+    # -- what built these features -----------------------------------------
+    @property
+    def extractor_fingerprint(self):
+        """The extractor this database's features were built with, if recorded.
+
+        ``None`` for a database written before fingerprinting existed.  Where
+        tiles disagree the weakest is returned, and :meth:`verify_extractor`
+        reports the disagreement itself.
+        """
+        from ..features.fingerprint import consensus  # noqa: PLC0415
+
+        fingerprint, _ = consensus(
+            [tile.metadata.extractor_fingerprint for tile in self._tiles.values()]
+        )
+        return fingerprint
+
+    def verify_extractor(self, current, strict: bool = True):
+        """Check this database's features against the extractor about to run.
+
+        Tile descriptors are written offline and compared against live frames in
+        the air, with nothing but configuration connecting the two.  When that
+        configuration drifts the failure is silent - the system boots, the camera
+        streams, and there are simply no matches - so the check happens here,
+        once, on the ground.
+
+        Raises :class:`ExtractorMismatchError` when the descriptors cannot be
+        compared at all and ``strict``.  A difference that merely costs match
+        quality is logged and returned, never fatal: the offline path
+        *intentionally* uses a larger keypoint budget and full tile resolution,
+        and grounding a correct setup would be worse than the problem.
+
+        Returns the :class:`~avinavi.features.fingerprint.FingerprintComparison`
+        so a caller can report it however it likes.
+        """
+        from ..features.fingerprint import compare_database, consensus  # noqa: PLC0415
+
+        fingerprints = [
+            tile.metadata.extractor_fingerprint for tile in self._tiles.values()
+        ]
+        comparison = compare_database(fingerprints, current)
+        stored, _ = consensus(fingerprints)
+
+        for note in comparison.degraded:
+            LOG.warning("map database %s: %s", self.path, note)
+
+        if comparison.incompatible:
+            detail = "; ".join(comparison.incompatible)
+            message = (
+                "the map database at %s cannot be matched against this "
+                "configuration: %s. Either fix the configuration or rebuild the "
+                "tiles with 'avinavi extract-features --force'."
+                % (self.path, detail)
+            )
+            if strict:
+                raise ExtractorMismatchError(message)
+            LOG.error("%s", message)
+        elif stored is not None and comparison.clean:
+            LOG.info(
+                "map database %s was built with %s, which matches this configuration",
+                self.path,
+                stored.describe(),
+            )
+        return comparison
 
     # -- the moving search window ------------------------------------------
     def candidates(

@@ -244,6 +244,20 @@ map:
   database_path: map_database
   terrain_alt_m: 0.0
   feature_cache_size: 64
+  # Tile features are built offline and compared against live frames in the
+  # air, with nothing but this configuration connecting the two. When it drifts
+  # the failure is silent: the system boots, the camera streams, and there are
+  # simply no matches. So the builder stamps every tile with what produced its
+  # features, and startup refuses to continue when they cannot be compared at
+  # all (a different backend, detector or descriptor width).
+  #
+  # Differences that only cost match quality are always reported and never
+  # fatal - the offline path deliberately uses a larger keypoint budget and the
+  # full tile resolution, and grounding a correct setup would be worse than the
+  # problem it prevents.
+  #
+  # Leave this on. Turn it off only to inspect a mismatched database on purpose.
+  verify_extractor: true
 
 # ---------------------------------------------------------------------------
 # Pose propagation between visual fixes (never repeats a stale pose forever)

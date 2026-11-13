@@ -420,6 +420,13 @@ class MapConfig:
     terrain_alt_m: float = 0.0
     #: Cache at most this many tiles' features in RAM (8 GB Pi: ~200 is safe).
     feature_cache_size: int = 64
+    #: Refuse to start when the tiles' features cannot be compared against the
+    #: configured extractor - a different backend, detector or descriptor width.
+    #: Set false only to inspect such a database deliberately; in the air it
+    #: turns a loud error on the ground into zero matches with no explanation.
+    #: Differences that merely cost match quality are always reported and never
+    #: fatal.  See :mod:`avinavi.features.fingerprint`.
+    verify_extractor: bool = True
 
 
 @dataclass

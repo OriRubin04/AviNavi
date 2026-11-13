@@ -102,6 +102,13 @@ tile at 1024 px rather than 640 is worth **15 points of lock rate and ten
 inliers** — a useful reminder that the tile side of the match deserves as much
 attention as the camera side.
 
+Nothing failed while that bug was live. No warning appeared; the lock rate was
+simply 15 points lower, which is indistinguishable from difficult ground. Every
+tile now records the resolution its features were actually extracted at, and
+`avinavi map-info` and startup both report a database whose features are coarser
+than its own rasters. See *What built these features* in
+[map-database.md](map-database.md).
+
 ### SIFT + ratio test (300 cycles per variant)
 
 The classical backend, kept as a measurement baseline and a no-torch fallback.

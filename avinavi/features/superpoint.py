@@ -24,7 +24,8 @@ from typing import Optional
 import numpy as np
 
 from ..mapdb.tile import TileFeatures
-from .resize import USE_CONFIGURED_RESIZE
+from .fingerprint import ExtractorFingerprint
+from .resize import USE_CONFIGURED_RESIZE, resolve_max_side
 
 LOG = logging.getLogger(__name__)
 
@@ -75,6 +76,24 @@ class SuperPointExtractor:
             nms_radius=config.nms_radius,
             device=config.device,
             resize_max_side=config.resize_max_side,
+        )
+
+    @property
+    def fingerprint(self) -> ExtractorFingerprint:
+        """What a consumer needs to know to tell whether features are comparable."""
+        return ExtractorFingerprint.from_extractor(self)
+
+    def analysis_max_side_for(self, image_max_side: int, resize_max_side=USE_CONFIGURED_RESIZE) -> int:
+        """Longest side this extractor would actually feed the network.
+
+        The builder records it so a tile stored at full resolution but described
+        at a smaller one is visible on inspection rather than only in a poor
+        match rate.
+        """
+        from .resize import analysis_max_side  # noqa: PLC0415 - avoids a wide import
+
+        return analysis_max_side(
+            image_max_side, resolve_max_side(self.resize_max_side, resize_max_side)
         )
 
     # -- model lifecycle ----------------------------------------------------
@@ -129,11 +148,7 @@ class SuperPointExtractor:
         torch = self._torch
 
         gray = _to_grayscale_float(image)
-        max_side = (
-            self.resize_max_side
-            if resize_max_side is USE_CONFIGURED_RESIZE
-            else resize_max_side
-        )
+        max_side = resolve_max_side(self.resize_max_side, resize_max_side)
         scaled, scale = _resize_max_side(gray, max_side)
 
         tensor = torch.from_numpy(scaled).to(self.device)[None, None]

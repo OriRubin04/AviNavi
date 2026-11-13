@@ -43,6 +43,15 @@ back to `features.npz` if that is what is on disk.
   "height_px": 1024,
   "ground_resolution_mpp": 0.5,
   "terrain_alt_m": 25.0,
+  "extractor": {
+    "backend": "superpoint",
+    "detector": "superpoint",
+    "descriptor_dim": 256,
+    "descriptor_kind": "float",
+    "max_num_keypoints": 4096,
+    "analysis_max_side": 1024,
+    "image_max_side": 1024
+  },
   "source": "orthophoto.tif",
   "source_window": [2048, 1024, 3072, 2048],
   "created_utc": "2026-07-31T09:14:22+00:00"
@@ -59,6 +68,11 @@ Required fields, per the specification:
 | `ground_resolution_mpp` | Ground sample distance, metres per pixel |
 | `image` | Path to the raster, relative to the tile directory |
 | `features` | Path to the SuperPoint keypoints and descriptors |
+
+`extractor` is written by the builder and is not part of the specification. It
+records what produced `features.pt` so a configuration that can no longer match
+these descriptors is caught on the ground — see *What built these features*
+below. A tile without it loads normally and reports itself as unverifiable.
 
 `terrain_alt_m` is the mean terrain altitude over the tile, in the same datum as
 the EKF origin. It is what turns a map-plane fix into a 3-D position, and it
@@ -142,6 +156,97 @@ any tiles missing features (exit code 1 if there are any).
 It also scores each tile for **localizability**: whether the imagery can support
 a match at all. This reads every tile's features, so it is the slow part of the
 command; `--no-localizability` skips it.
+
+## What built these features
+
+Tile descriptors are written **offline, once**. Live frame descriptors are
+produced **in the air, every cycle**. Nothing connects the two beyond the hope
+that the configuration did not move in between — and when it does move, the
+failure is silent: the system boots, the camera streams, the log looks healthy,
+and there are simply no matches.
+
+That has cost this project twice. Once the whole map was described at 640 px
+instead of full tile resolution because one key meant "use the configured
+resize" where "do not resize" was intended; fixing it was worth **fifteen points
+of lock rate**. The other time a measurement run silently used SIFT while
+reporting SuperPoint.
+
+So the builder stamps every tile with what produced its features:
+
+```json
+"extractor": {
+  "backend": "superpoint",
+  "detector": "superpoint",
+  "descriptor_dim": 256,
+  "descriptor_kind": "float",
+  "max_num_keypoints": 4096,
+  "analysis_max_side": 1024,
+  "image_max_side": 1024
+}
+```
+
+Everything there is *measured*, not copied from configuration: the descriptor
+width comes from the array just written, both resolutions from the image just
+fed in. The failure being guarded against is configuration that no longer
+describes what is on disk, so configuration is not the witness.
+
+`analysis_max_side` is the most useful field and the least obvious one. It is
+the longest side the detector **actually saw**. A tile stored at 1024 px but
+analysed at 640 is the fifteen-point bug, visible in one number without having
+to reason about which key was in force at build time.
+
+### Two kinds of difference, deliberately kept apart
+
+At startup `MapDatabase.verify_extractor` compares the stamp against the
+extractor the engine just built — the real object, not a second reading of the
+configuration, so there is no mirror of `_build_extractor` to fall out of step.
+
+**Incompatible → refuse to start.** A different backend, a different classical
+detector, a different descriptor width, or float descriptors against binary
+ones. The descriptors are not in the same space, so matching cannot work:
+
+```
+the map database at map_database cannot be matched against this configuration:
+feature backend: tiles were built with 'superpoint', this configuration uses
+'opencv'; descriptor width: tiles hold 256-dimensional descriptors, this
+configuration produces 128. Either fix the configuration or rebuild the tiles
+with 'avinavi extract-features --force'.
+```
+
+**Degraded → report and carry on.** Fewer or coarser features than intended.
+Refusing here would be *wrong*, because the offline path intentionally differs
+from the flight path on exactly these settings: `avinavi extract-features` gives
+a tile four times a live frame's keypoint budget (a tile covers far more ground)
+and runs at full tile resolution while the Pi downscales to
+`superpoint.resize_max_side`. Both are correct. A check that fired on every
+correct installation would be ignored thereafter, which is worse than no check.
+
+Every tile's stamp is compared, not one representative. A database half
+re-extracted with a new detector would otherwise pass or fail depending on which
+group the representative came from, and a partly-unmatchable map is worse than a
+wholly unmatchable one: the aircraft localizes over part of the route and goes
+blind over the rest, with nothing in the log to distinguish that from difficult
+ground. The message names the proportion — `3 of 240 tiles` says a partial
+re-extraction, a bare message says the configuration is simply wrong.
+
+### Inspecting and overriding
+
+`avinavi map-info` prints the stamp, so the check can be made before the flight
+rather than at it:
+
+```
+extractor: superpoint/superpoint, 256-d, float, <=4096 kp, analysed at 1024 px
+```
+
+A database built before stamping existed has no `extractor` block. That is
+reported as unverifiable and is **not** fatal — refusing would break every
+database built earlier, and the honest statement is "this cannot be checked",
+not "this is wrong". Rebuild with `avinavi extract-features` to enable the
+check.
+
+`map.verify_extractor: false` downgrades the refusal to an error log. It is for
+inspecting a mismatched database on purpose. In the air it turns a loud error on
+the ground into zero matches with no explanation, so leave it on.
 
 ## Ground that cannot be matched
 

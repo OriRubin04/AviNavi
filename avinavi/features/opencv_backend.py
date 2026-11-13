@@ -28,13 +28,16 @@ import numpy as np
 
 from ..features.lightglue_matcher import MatchResult
 from ..mapdb.tile import TileFeatures
-from .resize import USE_CONFIGURED_RESIZE
+from .fingerprint import ExtractorFingerprint, descriptor_kind_for
+from .resize import USE_CONFIGURED_RESIZE, resolve_max_side
 
 LOG = logging.getLogger(__name__)
 
 
-#: Detectors that produce float descriptors (L2 distance) vs binary (Hamming).
-_FLOAT_DESCRIPTOR_DETECTORS = ("sift",)
+#: Which detectors give float descriptors (L2) and which binary ones (Hamming)
+#: is :func:`avinavi.features.fingerprint.descriptor_kind_for`.  It lives there
+#: because the startup compatibility check needs the same answer, and two copies
+#: of this table would be two chances to disagree about a Hamming match.
 
 
 def _require_cv2():
@@ -71,7 +74,22 @@ class OpenCVExtractor:
 
     @property
     def uses_float_descriptors(self) -> bool:
-        return self.detector_name in _FLOAT_DESCRIPTOR_DETECTORS
+        return descriptor_kind_for(self.detector_name) == "float"
+
+    @property
+    def fingerprint(self) -> ExtractorFingerprint:
+        """What a consumer needs to know to tell whether features are comparable."""
+        return ExtractorFingerprint.from_extractor(self)
+
+    def analysis_max_side_for(
+        self, image_max_side: int, resize_max_side=USE_CONFIGURED_RESIZE
+    ) -> int:
+        """Longest side this extractor would actually feed the detector."""
+        from .resize import analysis_max_side  # noqa: PLC0415 - avoids a wide import
+
+        return analysis_max_side(
+            image_max_side, resolve_max_side(self.resize_max_side, resize_max_side)
+        )
 
     def _ensure_detector(self):
         """Build the configured detector, or explain precisely why it cannot.
@@ -137,11 +155,7 @@ class OpenCVExtractor:
         detector = self._ensure_detector()
 
         gray = _to_gray_u8(image)
-        max_side = (
-            self.resize_max_side
-            if resize_max_side is USE_CONFIGURED_RESIZE
-            else resize_max_side
-        )
+        max_side = resolve_max_side(self.resize_max_side, resize_max_side)
         scaled, scale = _resize_max_side(gray, max_side)
 
         keypoints, descriptors = detector.detectAndCompute(scaled, None)

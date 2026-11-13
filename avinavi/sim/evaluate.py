@@ -266,7 +266,7 @@ def build_tile_database(
 ) -> MapDatabase:
     """Cut ``basemap`` into georeferenced tiles and precompute their features."""
     cv2 = _require_cv2()
-    from ..mapdb.builder import write_tile
+    from ..mapdb.builder import _record_fingerprint, write_tile
     from ..mapdb.tile import TileFeatures
 
     # Start from an empty directory, always. Writing a new tiling over an old
@@ -298,7 +298,7 @@ def build_tile_database(
 
             tile_id = "tile_%04d" % index
             directory = os.path.join(output_dir, tile_id)
-            write_tile(
+            metadata = write_tile(
                 directory=directory,
                 image=patch,
                 bounds=BoundingBox(
@@ -319,6 +319,12 @@ def build_tile_database(
             features = extractor.extract(prepared, resize_max_side=None)
             features.image_size = (float(patch.shape[1]), float(patch.shape[0]))
             features.save(os.path.join(directory, "features.npz"))
+            # Stamp the simulated database exactly as the real builder does, so
+            # the startup compatibility check is exercised by every simulation
+            # rather than only in production.
+            _record_fingerprint(
+                metadata, extractor, features, prepared, resize_max_side=None
+            )
             index += 1
 
     database = MapDatabase.load(output_dir, feature_cache_size=64)

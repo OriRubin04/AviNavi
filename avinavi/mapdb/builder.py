@@ -278,11 +278,70 @@ def build_features(
         features = extractor.extract(image, resize_max_side=resize_max_side)
         features.image_size = (float(image.shape[1]), float(image.shape[0]))
         features.save(feature_path)
+        _record_fingerprint(
+            tile.metadata, extractor, features, image, resize_max_side=resize_max_side
+        )
         updated += 1
         LOG.info("tile %s: %d keypoints", tile.tile_id, len(features))
 
     database.write_index()
     return updated
+
+
+def _record_fingerprint(
+    metadata,
+    extractor,
+    features,
+    image: np.ndarray,
+    resize_max_side=None,
+) -> None:
+    """Stamp a tile with what built its features, and save the metadata.
+
+    Everything stored here is *measured*, not inferred from configuration: the
+    descriptor width comes from the array just written and both resolutions from
+    the image just fed in.  That is deliberate - the whole failure mode this
+    guards against is configuration that no longer describes what is on disk.
+
+    An extractor that does not expose a fingerprint (a test double, say) leaves
+    the tile unstamped rather than failing the build.  An unstamped tile already
+    reports itself at startup as unverifiable.
+    """
+    from ..features.fingerprint import ExtractorFingerprint  # noqa: PLC0415
+
+    try:
+        base = extractor.fingerprint
+    except AttributeError:
+        LOG.debug(
+            "%s does not expose a fingerprint; tile %s will be unverifiable",
+            type(extractor).__name__,
+            metadata.tile_id,
+        )
+        return
+    if not isinstance(base, ExtractorFingerprint):
+        return
+
+    image_max_side = int(max(image.shape[0], image.shape[1]))
+    try:
+        analysed = int(
+            extractor.analysis_max_side_for(image_max_side, resize_max_side=resize_max_side)
+        )
+    except (AttributeError, TypeError, ValueError):
+        analysed = None
+
+    descriptors = getattr(features, "descriptors", None)
+    dim = (
+        int(descriptors.shape[1])
+        if descriptors is not None and getattr(descriptors, "ndim", 0) == 2
+        and descriptors.shape[1]
+        else None
+    )
+
+    metadata.extractor = base.with_measurements(
+        descriptor_dim=dim,
+        analysis_max_side=analysed,
+        image_max_side=image_max_side,
+    ).to_dict()
+    metadata.save()
 
 
 def _features_are_current(feature_path: str, image_path: str) -> bool:
@@ -359,9 +418,27 @@ def summarise(database_path: str, score_localizability: bool = True) -> dict:
             "'avinavi extract-features' first" % len(missing_features)
         }
 
+    from ..features.fingerprint import consensus  # noqa: PLC0415
+
+    fingerprint, conflicts = consensus(
+        [t.metadata.extractor_fingerprint for t in database]
+    )
+
     return {
         "path": database_path,
         "tiles": len(database),
+        "extractor": (
+            {
+                "summary": fingerprint.describe(),
+                **fingerprint.to_dict(),
+                **({"conflicts": conflicts} if conflicts else {}),
+            }
+            if fingerprint is not None
+            else {
+                "summary": "not recorded - rebuild with 'avinavi extract-features' "
+                "so this database can be checked against a flight configuration"
+            }
+        ),
         "localizability": localizability,
         "coverage": coverage.as_tuple() if coverage else None,
         "coverage_center": (
