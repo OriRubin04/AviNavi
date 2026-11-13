@@ -35,6 +35,7 @@ docstring.  The *comparisons* are what this harness is for.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import logging
 import math
 import os
@@ -510,13 +511,28 @@ def run_simulation(
         config.photometric.clip_limit if normalizer else None,
     )
     if db_key not in cache:
+        # The directory has to distinguish exactly what db_key distinguishes.
+        # It once named only the backend, detector and normalisation, while
+        # db_key also separated the keypoint budget and the tile size - so two
+        # databases the cache correctly treated as different were written to
+        # one path, and build_tile_database begins by deleting that path.
+        #
+        # Sequentially inside one process that silently serves the wrong tiles:
+        # the first database object stays in the cache pointing at a directory
+        # that has since been rebuilt from different settings. Across
+        # concurrent processes it is worse and at least it is loud - one run
+        # deletes the directory another is writing into, which is how this was
+        # found (FileNotFoundError on tile_0013/features.npz).
+        #
+        # So the name is derived from db_key itself and cannot drift from it.
         tile_dir = os.path.join(
             workdir,
-            "tiles_%s_%s_%s"
+            "tiles_%s_%s_%s_%s"
             % (
                 config.features.backend,
                 config.features.detector,
                 "clahe" if normalizer else "raw",
+                hashlib.sha1(repr(db_key).encode("utf-8")).hexdigest()[:10],
             ),
         )
         cache[db_key] = build_tile_database(
