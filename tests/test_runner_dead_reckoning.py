@@ -24,6 +24,8 @@ import pytest
 
 from avinavi.app.runner import Runner
 from avinavi.config import Config
+from avinavi.localization.visual_odometry import DeadReckoner
+from tests.fakes import Clock
 from avinavi.geo import LocalOrigin
 from avinavi.localization.visual_odometry import OdometryDelta
 from avinavi.types import (
@@ -82,6 +84,11 @@ def runner(origin) -> Runner:
     runner = Runner(config)
     runner.engine = StubEngine(origin)
     runner.odometry = StubOdometry()
+    # Dead reckoning's limits are measured on a clock, not by summing the
+    # deltas' own dt - see tests/test_flow_failure.py - so the test drives one.
+    clock = Clock()
+    runner.reckoner = DeadReckoner.from_config(config.visual_odometry, clock=clock)
+    runner._clock = clock
     return runner
 
 
@@ -242,12 +249,14 @@ def test_dead_reckoning_stops_at_the_configured_limit(runner):
     runner.odometry.delta = delta(dt_s=0.1)
     runner._apply_dead_reckoning(map_fix(), StubFrame(0.0))
 
-    results = [
-        runner._apply_dead_reckoning(
-            failed_fix(timestamp=index * 0.1), StubFrame(index * 0.1)
+    results = []
+    for index in range(1, 20):
+        runner._clock.advance(0.1)
+        results.append(
+            runner._apply_dead_reckoning(
+                failed_fix(timestamp=index * 0.1), StubFrame(index * 0.1)
+            )
         )
-        for index in range(1, 20)
-    ]
     carried = [r for r in results if r.valid]
     expired = [r for r in results if r.reason == InvalidReason.DEAD_RECKONING_EXPIRED]
 
@@ -267,6 +276,7 @@ def test_a_later_map_fix_revives_dead_reckoning_after_expiry(runner):
     runner.odometry.delta = delta(dt_s=0.1)
     runner._apply_dead_reckoning(map_fix(), StubFrame(0.0))
     for index in range(1, 20):
+        runner._clock.advance(0.1)
         runner._apply_dead_reckoning(
             failed_fix(timestamp=index * 0.1), StubFrame(index * 0.1)
         )

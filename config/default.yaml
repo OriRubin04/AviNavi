@@ -308,6 +308,28 @@ visual_odometry:
   max_search_guidance_s: 60.0
   search_guidance_min_move_m: 15.0
 
+  # What actually bounds flying on optical flow: uncertainty in METRES, not a
+  # stopwatch. Flow navigation is a legitimate mode, not a few seconds' grace.
+  # So long as the drift is reported honestly, ArduPilot's EKF weights the
+  # measurement by the accuracy it is given - a 20 m-sigma position is useful,
+  # a 300 m one is correctly ignored. What was never safe was misreporting it.
+  # At the 5% drift above, 50 m is reached after about 1 km of flight.
+  max_position_sigma_m: 50.0
+
+  # Speed assumed for stretches where optical flow produced NOTHING, so that a
+  # failure of flow cannot hide. This fixed a measured bug of the worst kind:
+  # when flow failed it returned nothing, so the offset froze, the elapsed time
+  # froze with it (it was a sum of flow's own timestamps), every limit built on
+  # that time stopped applying, and the system published the same position with
+  # the same 3 m sigma and a fresh timestamp indefinitely - while the aircraft
+  # flew away at 22 m/s. After a minute: 1320 m of error reported as 3 m.
+  #
+  # Seconds nobody observed are seconds the aircraft could have flown anywhere
+  # up to its own speed, so they enter the uncertainty at that rate. A second
+  # of silence costs 40 m of sigma, so the gate above closes on its own and the
+  # system hands over to the autopilot's IMU - the third and last fallback.
+  unobserved_speed_mps: 40.0
+
 # ---------------------------------------------------------------------------
 # Manual re-anchor: the operator clicks the map to say where to search next.
 # Changes only the SEARCH WINDOW; it is not a position fix, and the next frame

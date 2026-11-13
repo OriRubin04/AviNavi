@@ -135,6 +135,32 @@ class VisualOdometryConfig:
     max_search_guidance_s: float = 60.0
     #: Don't bother moving the search centre for less than this.
     search_guidance_min_move_m: float = 15.0
+    #: Stop publishing once the reported position uncertainty passes this.
+    #:
+    #: This, not a stopwatch, is what bounds optical-flow navigation.  Flying
+    #: on flow is a legitimate mode rather than a few seconds' grace: so long
+    #: as the drift is reported honestly, ArduPilot's EKF weights the
+    #: measurement by the accuracy it is given, so a 20 m-sigma position is
+    #: useful and a 300 m one is correctly ignored.  What was never safe was
+    #: *misreporting* the drift.  A tolerance in metres is also what a mission
+    #: actually has: "roughly where we are" is a distance, not a duration.
+    #:
+    #: At the 5% drift above, 50 m is reached after about 1 km of flight.
+    max_position_sigma_m: float = 50.0
+    #: Speed assumed for stretches where optical flow produced nothing at all.
+    #:
+    #: Without this term a failure of flow was invisible and catastrophic.
+    #: When flow fails it returns nothing, so the accumulated offset froze, the
+    #: elapsed time froze with it - it was a sum of flow's own timestamps - and
+    #: every limit built on that time silently stopped applying.  Measured: the
+    #: system published the same position with the same 3 m sigma and a fresh
+    #: timestamp indefinitely, while the aircraft flew away at 22 m/s.
+    #:
+    #: Seconds nobody observed are seconds the aircraft could have flown
+    #: anywhere up to its own speed, so they enter the uncertainty at that
+    #: rate.  That makes a frozen position self-reporting: a second of silence
+    #: costs 40 m of sigma and the gate above closes on its own.
+    unobserved_speed_mps: float = 40.0
     #: Assumed 1-sigma drift as a fraction of distance travelled.  Used to grow
     #: the reported uncertainty; 0.05 means 5 m of error per 100 m flown.
     drift_fraction: float = 0.05

@@ -100,6 +100,14 @@ class Runner:
         #: localization thread starts and reads it, so it needs a lock.
         self._reckoner_lock = threading.Lock()
         self._reckoning_just_expired = False
+        #: Was the reckoned position publishable on the previous cycle?  The
+        #: publishing limit is a sigma in metres, and sigma grows with time
+        #: nobody observed, so the limit can be crossed on a cycle where the
+        #: odometry contributed nothing - which means the crossing has to be
+        #: noticed here rather than only where deltas are accumulated.
+        self._was_publishable = False
+        #: "Optical flow has stopped producing anything" announced once.
+        self._flow_loss_reported = False
         #: The EKF origin, kept so dead-reckoned NED can be turned back into a
         #: geographic point for steering the tile search.
         self._origin: Optional[LocalOrigin] = None
@@ -546,13 +554,12 @@ class Runner:
             if not self.reckoner.active:
                 # Nothing to reckon from yet.
                 return False
-            was_publishable = self.reckoner.publishable
-            publishable = self.reckoner.accumulate(delta)
-            if was_publishable and not publishable:
-                # The crossing, announced once. Accumulation continues past it
-                # so the tile search keeps following the aircraft.
-                self._reckoning_just_expired = True
-            return publishable
+            # The publishable -> not transition is detected in
+            # _apply_dead_reckoning instead, because the limit is a sigma that
+            # can be crossed on a cycle where no delta arrived at all.
+            # Accumulation continues past it so the search keeps following the
+            # aircraft.
+            return self.reckoner.accumulate(delta)
 
     def _steer_search_with_flow(self) -> None:
         """Move the tile search to where optical flow says the aircraft is.
@@ -621,7 +628,30 @@ class Runner:
             with self._reckoner_lock:
                 self.reckoner.start(0.0 if math.isnan(sigma) else sigma)
                 self._reckoning_just_expired = False
+                self._was_publishable = True
+                self._flow_loss_reported = False
             return fix
+
+        with self._reckoner_lock:
+            publishable = self.reckoner.publishable
+            if self._was_publishable and not publishable:
+                self._reckoning_just_expired = True
+            self._was_publishable = publishable
+
+        # Flow failing is a different event from flow drifting, and the operator
+        # needs them apart: drifting too far is the system working as designed,
+        # while "the camera can no longer see the ground move" means nothing but
+        # the autopilot's own IMU remains.  Checked before the drift branch
+        # because it is the more serious of the two.
+        if self.reckoner.flow_lost and not self._flow_loss_reported:
+            self._flow_loss_reported = True
+            self._notify(
+                "AviNavi: optical flow has produced nothing for %.1f s - no "
+                "visual position of any kind. Handing over to the autopilot's "
+                "inertial estimate; re-anchor on the map to recover."
+                % self.reckoner.unobserved_s,
+                warning=True,
+            )
 
         if self._reckoning_just_expired:
             # Say why once, so the log distinguishes "could not match" from
@@ -629,12 +659,12 @@ class Runner:
             # map matching reported.
             self._reckoning_just_expired = False
             self._notify(
-                "AviNavi: no reliable position for %.1f s (%.0f m flown); "
-                "transmission stopped. Optical flow keeps steering the tile "
-                "search, so the system may re-acquire on its own; re-anchor if "
-                "it does not."
+                "AviNavi: position uncertainty passed %.0f m after %.0f m flown "
+                "on optical flow; transmission stopped. Flow keeps steering the "
+                "tile search, so the system may re-acquire on its own; "
+                "re-anchor if it does not."
                 % (
-                    self.config.visual_odometry.max_dead_reckoning_s,
+                    self.config.visual_odometry.max_position_sigma_m,
                     self.reckoner.distance_m,
                 ),
                 warning=True,

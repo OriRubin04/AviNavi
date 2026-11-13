@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
@@ -427,10 +428,17 @@ class DeadReckoner:
         drift_fraction: float = 0.05,
         max_dead_reckoning_s: float = 10.0,
         max_search_guidance_s: float = 60.0,
+        max_position_sigma_m: float = 50.0,
+        unobserved_speed_mps: float = 40.0,
+        clock=None,
     ) -> None:
         self.drift_fraction = float(drift_fraction)
         self.max_dead_reckoning_s = float(max_dead_reckoning_s)
         self.max_search_guidance_s = float(max_search_guidance_s)
+        self.max_position_sigma_m = float(max_position_sigma_m)
+        self.unobserved_speed_mps = float(unobserved_speed_mps)
+        #: Injectable so the staleness logic can be tested without sleeping.
+        self._clock = clock or time.monotonic
         self._north_m = 0.0
         self._east_m = 0.0
         self._distance_m = 0.0
@@ -438,13 +446,23 @@ class DeadReckoner:
         self._base_sigma_m = 0.0
         self._active = False
         self._expired = False
+        #: Wall-clock times, not sums of odometry dt.  Summing dt was a bug:
+        #: when optical flow failed it stopped being called, so the elapsed
+        #: time froze, the limit never tripped, and a stale position was
+        #: published as current with an unchanged sigma - forever.  See
+        #: :meth:`unobserved_s`.
+        self._started_at: Optional[float] = None
+        self._last_delta_at: Optional[float] = None
 
     @classmethod
-    def from_config(cls, config) -> "DeadReckoner":
+    def from_config(cls, config, clock=None) -> "DeadReckoner":
         return cls(
             drift_fraction=config.drift_fraction,
             max_dead_reckoning_s=config.max_dead_reckoning_s,
             max_search_guidance_s=getattr(config, "max_search_guidance_s", 60.0),
+            max_position_sigma_m=getattr(config, "max_position_sigma_m", 50.0),
+            unobserved_speed_mps=getattr(config, "unobserved_speed_mps", 40.0),
+            clock=clock,
         )
 
     def start(self, base_sigma_m: float) -> None:
@@ -456,10 +474,35 @@ class DeadReckoner:
         self._base_sigma_m = max(0.0, float(base_sigma_m))
         self._active = True
         self._expired = False
+        now = self._clock()
+        self._started_at = now
+        self._last_delta_at = now
 
     def clear(self) -> None:
         self._active = False
         self._expired = False
+        self._started_at = None
+        self._last_delta_at = None
+
+    @property
+    def unobserved_s(self) -> float:
+        """Wall-clock seconds since optical flow last produced a displacement.
+
+        This is the "has optical flow failed?" signal, and it has to come from
+        a clock rather than from the odometry's own timestamps: when flow fails
+        it produces nothing at all, so anything derived from its output stops
+        advancing and every limit built on it silently stops applying.
+        """
+        if not self._active or self._last_delta_at is None:
+            return 0.0
+        return max(0.0, self._clock() - self._last_delta_at)
+
+    @property
+    def wall_elapsed_s(self) -> float:
+        """Wall-clock seconds since the map fix this reckoning started from."""
+        if not self._active or self._started_at is None:
+            return 0.0
+        return max(0.0, self._clock() - self._started_at)
 
     @property
     def active(self) -> bool:
@@ -475,10 +518,50 @@ class DeadReckoner:
     def publishable(self) -> bool:
         """May the accumulated position be sent to the autopilot?
 
-        Separate from :attr:`active` because the accumulation outlives the
-        publishing budget by design - see :attr:`guides_search`.
+        Governed by **uncertainty in metres**, not by a stopwatch. Optical-flow
+        navigation is a legitimate mode, not a few seconds' grace: as long as
+        the drift is reported honestly, ArduPilot's EKF weights the measurement
+        by the accuracy it is given, so a 20 m-sigma position is useful and a
+        300 m one is correctly ignored. The thing that was never safe was
+        *misreporting* the drift.
+
+        So the limit is a tolerance the mission sets in metres, and the time
+        limit is only a backstop. Expressing it this way also makes a failure
+        of flow itself self-limiting: the unobserved term in :attr:`sigma_m`
+        grows at the airframe's speed, so a second of silence costs tens of
+        metres and the gate closes on its own.
         """
-        return self._active and not self._expired
+        if not self._active or self._expired:
+            return False
+        if self.max_position_sigma_m > 0.0 and self.sigma_m > self.max_position_sigma_m:
+            return False
+        return True
+
+    @property
+    def flow_lost(self) -> bool:
+        """Has optical flow stopped producing displacements altogether?
+
+        The hand-off point to the third tier. Reported separately from
+        :attr:`publishable` because the two mean different things to an
+        operator: "drifted too far to trust" is the system working as designed,
+        while "the camera can no longer see the ground move" is a failure, and
+        it is the one that means nothing but the autopilot's own IMU remains.
+        """
+        if not self._active:
+            return False
+        return self.unobserved_s > self._flow_timeout_s
+
+    @property
+    def _flow_timeout_s(self) -> float:
+        """How long without a displacement counts as flow having failed.
+
+        Derived rather than configured: the moment the unmeasured term alone
+        exceeds the mission's tolerance, the position is worthless whatever
+        else is true, so there is nothing to gain by waiting longer.
+        """
+        if self.max_position_sigma_m <= 0.0 or self.unobserved_speed_mps <= 0.0:
+            return float("inf")
+        return self.max_position_sigma_m / self.unobserved_speed_mps
 
     @property
     def guides_search(self) -> bool:
@@ -495,7 +578,7 @@ class DeadReckoner:
         return (
             self._active
             and self.max_search_guidance_s > 0.0
-            and self._elapsed_s <= self.max_search_guidance_s
+            and self.wall_elapsed_s <= self.max_search_guidance_s
         )
 
     @property
@@ -513,14 +596,27 @@ class DeadReckoner:
 
     @property
     def sigma_m(self) -> float:
-        """Position uncertainty: the fix's own, grown by the distance flown.
+        """Position uncertainty: the fix's own, grown by two separate things.
 
-        Added in quadrature rather than summed, because the two are
-        independent: the map fix's error does not become more wrong because the
-        aircraft then flew somewhere.
+        **Distance flown**, measured: optical flow tracked it, and the drift is
+        a fraction of it.
+
+        **Time not observed**, unmeasured: seconds during which flow produced
+        nothing, so the displacement over them is unknown and could be anything
+        up to the airframe's speed. This term is why a frozen position cannot
+        masquerade as a confident one. Without it, flow failing meant the
+        position stopped moving *and the uncertainty stopped growing*, so the
+        system published "you are here, 3 m sure, as of now" indefinitely while
+        the aircraft flew away at 22 m/s.
+
+        All three are added in quadrature because they are independent: the map
+        fix's error does not become more wrong because the aircraft then flew
+        somewhere, and neither does the tracked drift because the camera later
+        lost its footing.
         """
         drift = self.drift_fraction * self._distance_m
-        return math.hypot(self._base_sigma_m, drift)
+        unobserved = self.unobserved_speed_mps * self.unobserved_s
+        return math.sqrt(self._base_sigma_m ** 2 + drift ** 2 + unobserved ** 2)
 
     def accumulate(self, delta: OdometryDelta) -> bool:
         """Add one delta.  Returns False once the publishing budget is passed.
@@ -532,16 +628,17 @@ class DeadReckoner:
         """
         if not self._active:
             return False
+        self._last_delta_at = self._clock()
         self._elapsed_s += delta.dt_s
         self._north_m += delta.north_m
         self._east_m += delta.east_m
         self._distance_m += delta.distance_m
-        if not self._expired and self._elapsed_s > self.max_dead_reckoning_s:
+        if not self._expired and self.wall_elapsed_s > self.max_dead_reckoning_s:
             LOG.warning(
                 "dead reckoning has run %.1f s (limit %.1f s) and %.0f m without a "
                 "map fix; no longer publishing a position, but still steering the "
                 "tile search with it for up to %.0f s",
-                self._elapsed_s,
+                self.wall_elapsed_s,
                 self.max_dead_reckoning_s,
                 self._distance_m,
                 self.max_search_guidance_s,

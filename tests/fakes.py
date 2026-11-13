@@ -233,3 +233,25 @@ def similarity_homography(
     matrix[:2, :2] = scale * np.array([[cos_r, -sin_r], [sin_r, cos_r]])
     matrix[:2, 2] = translation
     return matrix
+
+
+class Clock:
+    """A monotonic clock the test drives.
+
+    Dead reckoning's limits are measured against a clock rather than against a
+    sum of optical flow's own timestamps, because a component that has failed
+    stops emitting timestamps and every limit built on them silently stops
+    applying - which is exactly how a frozen position came to be published as
+    a confident current one. Tests therefore have to advance time explicitly,
+    and this makes that possible without sleeping.
+    """
+
+    def __init__(self, t: float = 0.0) -> None:
+        self.t = float(t)
+
+    def __call__(self) -> float:
+        return self.t
+
+    def advance(self, seconds: float) -> "Clock":
+        self.t += float(seconds)
+        return self

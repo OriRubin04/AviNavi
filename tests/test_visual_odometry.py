@@ -20,6 +20,7 @@ import pytest
 
 from avinavi.config import CameraConfig, CameraExtrinsicsConfig, VisualOdometryConfig
 from avinavi.frames import CameraExtrinsics
+from tests.fakes import Clock
 from avinavi.localization.visual_odometry import (
     DeadReckoner,
     FrameToFrameOdometry,
@@ -436,11 +437,18 @@ def test_the_uncertainty_never_shrinks_below_the_starting_fix():
 
 
 def test_publishing_stops_at_the_time_limit():
-    """Past this it is actively harmful to navigate on, so it is not published."""
-    reckoner = DeadReckoner(max_dead_reckoning_s=1.0)
+    """Past this it is actively harmful to navigate on, so it is not published.
+
+    Time is advanced on a clock rather than by summing the deltas' own dt,
+    because that is what the limit now measures - see tests/test_flow_failure.py
+    for the bug that forced the change.
+    """
+    clock = Clock()
+    reckoner = DeadReckoner(max_dead_reckoning_s=1.0, clock=clock)
     reckoner.start(base_sigma_m=2.0)
     accepted = 0
     for _ in range(30):
+        clock.advance(0.1)
         if reckoner.accumulate(delta(dt_s=0.1)):
             accepted += 1
     assert accepted == 10
@@ -457,12 +465,17 @@ def test_accumulation_outlives_the_publishing_limit():
     and the search window stayed where the last fix put it while the aircraft
     flew on - the reason the system could not re-acquire unaided.
     """
-    reckoner = DeadReckoner(max_dead_reckoning_s=1.0, max_search_guidance_s=60.0)
+    clock = Clock()
+    reckoner = DeadReckoner(
+        max_dead_reckoning_s=1.0, max_search_guidance_s=60.0, clock=clock
+    )
     reckoner.start(base_sigma_m=2.0)
     for _ in range(10):
+        clock.advance(0.1)
         reckoner.accumulate(delta(dt_s=0.1, north=5.0))
     at_limit, _ = reckoner.offset_ned_m
     for _ in range(20):
+        clock.advance(0.1)
         reckoner.accumulate(delta(dt_s=0.1, north=5.0))
     after_limit, _ = reckoner.offset_ned_m
 
@@ -473,12 +486,17 @@ def test_accumulation_outlives_the_publishing_limit():
 
 
 def test_guidance_has_its_own_limit():
-    reckoner = DeadReckoner(max_dead_reckoning_s=1.0, max_search_guidance_s=2.0)
+    clock = Clock()
+    reckoner = DeadReckoner(
+        max_dead_reckoning_s=1.0, max_search_guidance_s=2.0, clock=clock
+    )
     reckoner.start(base_sigma_m=2.0)
     for _ in range(15):
+        clock.advance(0.1)
         reckoner.accumulate(delta(dt_s=0.1))
     assert reckoner.guides_search is True
     for _ in range(10):
+        clock.advance(0.1)
         reckoner.accumulate(delta(dt_s=0.1))
     assert reckoner.guides_search is False
 
@@ -492,9 +510,11 @@ def test_guidance_can_be_disabled():
 
 def test_clearing_resets_the_expiry():
     """A re-anchor or a new fix must not inherit the old expired state."""
-    reckoner = DeadReckoner(max_dead_reckoning_s=1.0)
+    clock = Clock()
+    reckoner = DeadReckoner(max_dead_reckoning_s=1.0, clock=clock)
     reckoner.start(base_sigma_m=2.0)
     for _ in range(30):
+        clock.advance(0.1)
         reckoner.accumulate(delta(dt_s=0.1))
     assert reckoner.expired is True
     reckoner.start(base_sigma_m=1.0)

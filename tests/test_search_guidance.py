@@ -30,7 +30,8 @@ import pytest
 from avinavi.app.runner import Runner
 from avinavi.config import Config
 from avinavi.geo import LocalOrigin, haversine_distance_m
-from avinavi.localization.visual_odometry import OdometryDelta
+from avinavi.localization.visual_odometry import DeadReckoner, OdometryDelta
+from tests.fakes import Clock
 from avinavi.types import (
     Attitude,
     GeoPoint,
@@ -63,7 +64,12 @@ def origin() -> LocalOrigin:
 
 
 @pytest.fixture
-def runner(origin) -> Runner:
+def clock() -> Clock:
+    return Clock()
+
+
+@pytest.fixture
+def runner(origin, clock) -> Runner:
     config = Config()
     config.camera.fx = config.camera.fy = 900.0
     config.camera.cx, config.camera.cy = 640.0, 360.0
@@ -74,6 +80,9 @@ def runner(origin) -> Runner:
     runner = Runner(config)
     runner.engine = _StubEngine(origin)
     runner._origin = origin
+    # The reckoner's limits are measured on a clock, so the test drives one.
+    runner.reckoner = DeadReckoner.from_config(config.visual_odometry, clock=clock)
+    runner._clock = clock
     return runner
 
 
@@ -94,7 +103,8 @@ def map_fix(north=0.0, east=0.0) -> VisualFix:
 
 
 def fly(runner, north_m=0.0, east_m=0.0, dt_s=0.1):
-    """Feed one odometry delta straight into the reckoner."""
+    """Advance the clock and feed one odometry delta into the reckoner."""
+    runner._clock.advance(dt_s)
     runner.reckoner.accumulate(
         OdometryDelta(
             north_m=north_m,
@@ -157,6 +167,7 @@ class TestTheWindowFollowsTheAircraft:
     def test_guidance_stops_at_its_own_limit(self, runner):
         runner.config.visual_odometry.max_search_guidance_s = 2.0
         runner.reckoner.max_search_guidance_s = 2.0
+        runner.reckoner.max_dead_reckoning_s = 2.0
         runner._last_map_fix = map_fix()
         runner.reckoner.start(3.0)
         for _ in range(5):
