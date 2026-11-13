@@ -132,7 +132,12 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--backend", choices=["superpoint", "opencv"], default="superpoint")
     parser.add_argument("--max-cycles", type=int, default=150)
-    parser.add_argument("--duration", type=float, default=400.0)
+    parser.add_argument(
+        "--duration",
+        type=float,
+        default=None,
+        help="trajectory seconds; defaults to just enough for --max-cycles",
+    )
     parser.add_argument("--basemap-px", type=int, default=4000)
     parser.add_argument("--extent-m", type=float, default=600.0)
     parser.add_argument("--out", default=None)
@@ -174,6 +179,13 @@ def main() -> int:
     print("  %-22s %-7s %-7s %-9s %-8s %s"
           % ("variant", "lock", "false", "p50 err", "inliers", "cycles"))
 
+    # Each variant now renders its own frames - that is the point of the fix in
+    # evaluate.py - so rendering a long trajectory and then using 150 cycles of
+    # it costs real time for nothing.  A dt of 0.5 s at 2 Hz means one cycle per
+    # point, so ask for exactly the points that will be used.
+    dt_s = 0.5
+    duration_s = args.duration or (args.max_cycles + 2) * dt_s
+
     results = []
     for label, height, fov in variants:
         trajectory = fly_circuit(
@@ -182,8 +194,8 @@ def main() -> int:
             cruise_height_m=height,
             max_bank_deg=30.0,
             wind_ned=(4.0, -3.0),
-            duration_s=args.duration,
-            dt_s=0.5,
+            duration_s=duration_s,
+            dt_s=dt_s,
             pattern="racetrack",
         )
         started = time.time()
