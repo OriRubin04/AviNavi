@@ -333,8 +333,8 @@ def test_points_that_disagree_with_each_other_are_rejected(world):
     """
     simulator, settings, extrinsics = world
     tracker = odometry(settings, extrinsics)
-    tracker.max_residual_m = 1.0
-    tracker.max_residual_fraction = 0.25
+    tracker.max_residual_pixels = 4.0
+    tracker.min_residual_m = 0.25
 
     tracker.update(simulator.render(point(0.0, 0.0)), 0.0, HEIGHT_M)
     delta = tracker.update(simulator.render(point(22.0, 0.0)), 1.0, HEIGHT_M)
@@ -343,8 +343,8 @@ def test_points_that_disagree_with_each_other_are_rejected(world):
     # With the gate disabled, the bad estimate comes through — which is what
     # makes this a gate rather than a coincidence.
     tracker.reset()
-    tracker.max_residual_m = 1e9
-    tracker.max_residual_fraction = 1e9
+    tracker.max_residual_pixels = 1e9
+    tracker.min_residual_m = 1e9
     tracker.update(simulator.render(point(0.0, 0.0)), 0.0, HEIGHT_M)
     ungated = tracker.update(simulator.render(point(22.0, 0.0)), 1.0, HEIGHT_M)
     assert ungated is not None
@@ -357,8 +357,8 @@ def test_points_that_disagree_with_each_other_are_rejected(world):
 def test_a_small_true_displacement_is_not_rejected_by_the_absolute_floor(world):
     """A stationary camera has a tiny displacement and a tiny residual.
 
-    Without the absolute floor, the fractional gate would reject it: 25% of
-    almost nothing is almost nothing.
+    The floor exists so that a low pass, where a pixel is worth very little
+    ground, does not make the gate impossibly tight.
     """
     delta = fly(world, point(0.0, 0.0), point(0.0, 0.0))
     assert delta is not None

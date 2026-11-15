@@ -282,6 +282,21 @@ visual_odometry:
   drift_fraction: 0.05           # 5 m of assumed error per 100 m flown
   resize_max_side: 480
 
+  # How far tracked points may disagree with each other before the estimate is
+  # refused, in PIXELS of ground sample distance. This gate is what stops the
+  # module producing a confident wrong answer, and it is absolute on purpose.
+  #
+  # It used to be max(1.0 m, 0.25 x displacement) - a fraction of the very
+  # quantity under test, so the more wrong the answer the more forgiving the
+  # gate. Measured, with a stale attitude projecting a banked frame as level:
+  # a 63 m displacement against a 2.2 m truth passed, and so did an 11.8 m one
+  # (which is 59 m/s over 0.2 s, just under the 60 m/s speed cap).
+  #
+  # 4 px is about 0.43 m at 120 m AGL and 0.87 m at 240 m; a working tracker
+  # measures 0.07 m.
+  max_residual_pixels: 4.0
+  min_residual_m: 0.25
+
   # Optical flow does two jobs with very different accuracy requirements, and
   # they get separate budgets because conflating them stopped the system from
   # ever recovering on its own.

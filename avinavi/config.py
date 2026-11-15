@@ -166,6 +166,20 @@ class VisualOdometryConfig:
     drift_fraction: float = 0.05
     #: Downscale frames before tracking; flow does not need full resolution.
     resize_max_side: int = 480
+    #: How far tracked points may disagree with each other, in PIXELS of
+    #: ground sample distance, before the estimate is refused.
+    #:
+    #: Absolute by construction. The earlier form was a fraction of the
+    #: displacement, which made the gate forgiving in exact proportion to how
+    #: wrong the answer was: with a banked frame projected as level, a 63 m
+    #: displacement against a 2.2 m truth passed it. A limit expressed in the
+    #: imaging geometry cannot be inflated by the error it is checking.
+    #:
+    #: 4 px is about 0.43 m at 120 m AGL and 0.87 m at 240 m, against a
+    #: measured 0.07 m when the tracker is working.
+    max_residual_pixels: float = 4.0
+    #: Floor, so a very low pass does not make the gate impossibly tight.
+    min_residual_m: float = 0.25
 
 
 @dataclass

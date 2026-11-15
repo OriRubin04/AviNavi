@@ -534,7 +534,24 @@ class Runner:
         if not self.config.visual_odometry.enabled or not self.odometry.available:
             return False
 
-        roll, pitch, yaw = self._attitude()
+        # Dead reckoning integrates whatever this returns, and the residual
+        # gate cannot catch an attitude error: both frames are projected with
+        # the *same* wrong angles, so the points agree with each other
+        # perfectly while the displacement is wrong. Measured, with a banked
+        # frame projected as level at a 60 degree field of view: 11.8 m claimed
+        # against a 2.2 m truth, 0.9 m of internal disagreement, accepted.
+        #
+        # So this refuses to guess. An absent attitude source is still level
+        # flight - that is a configuration, not a failure - but a source that
+        # has gone stale means the aircraft's attitude is unknown, and an
+        # unknown attitude is no information rather than zero.
+        attitude = self._fresh_attitude()
+        if attitude is None and self.connection is not None:
+            # None, not zero. The odometry still caches the frame and simply
+            # declines to solve, so this costs one update rather than two.
+            roll = pitch = yaw = None
+        else:
+            roll, pitch, yaw = attitude or (0.0, 0.0, 0.0)
         try:
             delta = self.odometry.update(
                 frame.image,
@@ -542,7 +559,7 @@ class Runner:
                 height_m=self._height_hint(),
                 roll_rad=roll,
                 pitch_rad=pitch,
-                yaw_rad=yaw or 0.0,
+                yaw_rad=yaw,
             )
         except Exception:
             LOG.exception("visual odometry raised; continuing without it")
@@ -717,14 +734,31 @@ class Runner:
             dead_reckoning_s=self.reckoner.elapsed_s,
         )
 
-    def _attitude(self):
-        """``(roll, pitch, yaw)`` from the autopilot, or level flight."""
+    def _fresh_attitude(self):
+        """``(roll, pitch, yaw)`` only if the autopilot's attitude is current.
+
+        ``None`` when there is an attitude source and it has gone stale. That
+        is different from there being no source at all, and the difference
+        matters: an absent source is a known, static condition the operator
+        configured, while a stale one is a transient failure during which the
+        aircraft is probably still doing whatever it was doing.
+        """
         if self.connection is None:
-            return (0.0, 0.0, None)
+            return None
         state = self.connection.state
         if state.attitude_age() < 0.5 and state.roll_rad is not None:
             return (state.roll_rad, state.pitch_rad, state.yaw_rad)
-        return (0.0, 0.0, None)
+        return None
+
+    def _attitude(self):
+        """Attitude for rectification, falling back to level flight.
+
+        Safe here, and only here, because a wrongly rectified frame still has
+        to earn its match against real map data: a bad assumption costs a fix,
+        it cannot manufacture one. Dead reckoning has no such backstop, which
+        is why :meth:`track_frame` uses :meth:`_fresh_attitude` instead.
+        """
+        return self._fresh_attitude() or (0.0, 0.0, None)
 
     def _height_hint(self) -> Optional[float]:
         """Height above the mapped terrain, from the autopilot where fresh."""

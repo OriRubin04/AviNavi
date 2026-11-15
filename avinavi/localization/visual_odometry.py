@@ -115,17 +115,21 @@ class FrameToFrameOdometry:
         #: Refuse an estimate implying a speed above this; a fixed wing does not
         #: teleport, and a flow field that says it did is a tracking failure.
         max_speed_mps: float = 60.0,
-        #: Refuse an estimate whose surviving points disagree with each other by
-        #: more than this fraction of the displacement they claim.  **This gate
-        #: is what stops the module producing a confident wrong answer**, which
-        #: it otherwise does as soon as frames are spaced too far apart: at a
-        #: 1 s gap it returned 7.4 m for a true 22 m, from 23 points that
-        #: disagreed among themselves by 14.7 m.  Enough points survived to pass
-        #: the count check, and nothing else looked at whether they agreed.
-        max_residual_fraction: float = 0.25,
-        #: Absolute floor on the above, so a small true displacement is not
-        #: rejected for a residual that is small in absolute terms.
-        max_residual_m: float = 1.0,
+        #: How far tracked points may disagree with each other, in PIXELS of
+        #: ground sample distance, before the estimate is refused.  **This gate
+        #: is what stops the module producing a confident wrong answer.**
+        #:
+        #: It is expressed in pixels and converted to metres with the current
+        #: height, so it is absolute: it does not scale with the displacement
+        #: being tested.  The earlier form, max(1.0 m, 0.25 * distance), did,
+        #: and that made it forgiving in exact proportion to how wrong the
+        #: answer was - a 63 m displacement against a 2.2 m truth passed it.
+        #:
+        #: 4 px is roughly 0.4 m at 120 m AGL and 0.9 m at 240 m, against a
+        #: measured residual of 0.07 m when the tracker is working.
+        max_residual_pixels: float = 4.0,
+        #: Floor, so that a very low pass does not make the gate impossible.
+        min_residual_m: float = 0.25,
     ) -> None:
         self.extrinsics = extrinsics
         self.fx = fx
@@ -137,8 +141,8 @@ class FrameToFrameOdometry:
         self.resize_max_side = int(resize_max_side)
         self.outlier_mads = float(outlier_mads)
         self.max_speed_mps = float(max_speed_mps)
-        self.max_residual_fraction = float(max_residual_fraction)
-        self.max_residual_m = float(max_residual_m)
+        self.max_residual_pixels = float(max_residual_pixels)
+        self.min_residual_m = float(min_residual_m)
 
         self._previous_gray = None
         self._previous_points = None
@@ -153,6 +157,8 @@ class FrameToFrameOdometry:
                 max_points=config.max_points,
                 min_points=config.min_points,
                 resize_max_side=config.resize_max_side,
+                max_residual_pixels=getattr(config, "max_residual_pixels", 4.0),
+                min_residual_m=getattr(config, "min_residual_m", 0.25),
             )
         return cls(
             extrinsics=extrinsics,
@@ -179,9 +185,9 @@ class FrameToFrameOdometry:
         frame: np.ndarray,
         timestamp_monotonic: float,
         height_m: Optional[float],
-        roll_rad: float = 0.0,
-        pitch_rad: float = 0.0,
-        yaw_rad: float = 0.0,
+        roll_rad: Optional[float] = 0.0,
+        pitch_rad: Optional[float] = 0.0,
+        yaw_rad: Optional[float] = 0.0,
     ) -> Optional[OdometryDelta]:
         """Track from the previous frame to this one.
 
@@ -191,26 +197,43 @@ class FrameToFrameOdometry:
         caller must treat differently from a zero displacement.
         """
         cv2 = _require_cv2()
-        if not self.available or height_m is None or height_m <= 0.0:
+        if not self.available:
             self.reset()
             return None
 
+        # Cache this frame before any of the checks below, and never reset on
+        # them. A missing height or a stale attitude means this *one* estimate
+        # cannot be made; throwing the frame away would also destroy the next
+        # one, because there would be nothing to track from. One bad cycle
+        # should cost one update, not two.
         gray, scale = self._prepare(cv2, frame)
+        previous_gray = self._previous_gray
+        previous_points = self._previous_points
+        previous_state = self._previous_state
+        self._previous_gray = gray
+        self._scale = scale
+        self._previous_points = self._detect(cv2, gray)
+
+        unknown = (
+            height_m is None
+            or height_m <= 0.0
+            or roll_rad is None
+            or pitch_rad is None
+            or yaw_rad is None
+        )
+        if unknown:
+            # No information, which is not the same as no movement. Projecting
+            # with assumed angles would produce a displacement that every
+            # tracked point agrees with and that is still wrong, because both
+            # frames share the same wrong assumption.
+            self._previous_state = None
+            return None
+
         R = self.extrinsics.R_ned_from_camera(
             euler_to_matrix(roll_rad, pitch_rad, yaw_rad)
         )
         state = (R, float(height_m), float(timestamp_monotonic))
-
-        previous_gray = self._previous_gray
-        previous_points = self._previous_points
-        previous_state = self._previous_state
-
-        # Always leave this frame as the basis for the next cycle, whatever
-        # happens below: a failed estimate must not also lose the frame.
-        self._previous_gray = gray
-        self._scale = scale
         self._previous_state = state
-        self._previous_points = self._detect(cv2, gray)
 
         if previous_gray is None or previous_points is None or previous_state is None:
             return None
@@ -370,22 +393,54 @@ class FrameToFrameOdometry:
         # of a disagreeing set is not an estimate - it is a number. This is the
         # gate that turns "tracking failed" from a confident wrong displacement
         # into no displacement.
-        tolerance = max(
-            self.max_residual_m, self.max_residual_fraction * delta.distance_m
-        )
+        #
+        # The tolerance is ABSOLUTE, derived from the imaging geometry. It was
+        # once max(1.0 m, 0.25 * distance), which scaled with the very quantity
+        # under test: the more wrong the answer, the more forgiving the gate.
+        # Measured consequence, with a stale attitude projecting a banked frame
+        # as level at a 60 degree field of view:
+        #
+        #     mismatch  implied   truth   residual  old limit  verdict
+        #        5 deg    11.8 m   2.2 m     0.9 m      2.9 m  ACCEPTED
+        #       25 deg    63.1 m   2.2 m     9.0 m     15.8 m  ACCEPTED
+        #
+        # A 63 m displacement against a 2.2 m truth passed, because the limit
+        # grew with it. An absolute limit cannot be inflated that way.
+        #
+        # The scale comes from the ground sample distance: a point mismatched
+        # by a few pixels is wrong by a few pixels' worth of ground, and that
+        # is height/focal_length per pixel. So the gate tightens as the
+        # aircraft descends and loosens as it climbs, which is how the real
+        # error behaves - unlike the displacement, which does not govern it at
+        # all.
+        tolerance = self._residual_tolerance_m(height_current)
         if residual > tolerance:
             LOG.warning(
                 "visual odometry rejected: %d points claim %.1f m but disagree "
-                "among themselves by %.1f m (limit %.1f m). Frames are probably "
-                "spaced too far apart for the tracker - at 22 m/s it needs "
-                "better than about 0.5 s between frames.",
+                "among themselves by %.2f m (limit %.2f m at %.0f m AGL). Either "
+                "the tracker lost its footing, or the attitude used to project "
+                "the two frames was inconsistent between them.",
                 delta.tracked_points,
                 delta.distance_m,
                 residual,
                 tolerance,
+                height_current,
             )
             return None
         return delta
+
+    def _residual_tolerance_m(self, height_m: float) -> float:
+        """How far tracked points may disagree before the estimate is refused.
+
+        Absolute, and a function of the imaging geometry rather than of the
+        answer: ``residual_pixels`` worth of ground sample distance, with a
+        floor so that a very low pass does not make the gate impossibly tight.
+        """
+        fx = float(self.fx or 0.0)
+        if fx <= 0.0 or height_m <= 0.0:
+            return self.min_residual_m
+        gsd = height_m / fx
+        return max(self.min_residual_m, self.max_residual_pixels * gsd)
 
     @staticmethod
     def _rotation(ground_previous: np.ndarray, ground_current: np.ndarray) -> float:
