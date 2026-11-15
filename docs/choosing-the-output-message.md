@@ -65,13 +65,33 @@ reconstructs a variance from it using a GNSS-derived scaling. The one number
 that protects the autopilot from a bad fix is the number the interface handles
 worst.
 
-### 5. Losing the fix looks like losing GPS
+### 5. Losing the fix is silent, and nothing catches it
 
-When this system stops publishing — which it is designed to do, deliberately and
-often — the autopilot sees a GPS dropout and may run its GPS failsafe. That
-failsafe typically wants to fly home, which needs the position that was just
-lost. With external navigation the EKF handles source loss through
-`EK3_SRC*` fallback instead, which is the mechanism intended for it.
+An earlier version of this document claimed that when the system stops
+publishing, the autopilot runs its GPS failsafe. **That was wrong.**
+ArduPlane has no GPS failsafe at all — unlike Copter, which has
+`FS_EKF_ACTION`, ArduPlane defines no equivalent. There is no `FS_GPS_*`
+parameter and no code path that reacts to the loss of a position source.
+
+The real behaviour is worse than a failsafe firing, and worse in a way that is
+easy to miss: when this system stops publishing — which it is designed to do,
+deliberately and often — EKF3 simply coasts on inertial dead reckoning and
+**says nothing**. No mode change, no warning, no message to the operator. The
+aircraft keeps flying its mission on a position estimate that drifts without
+bound. In a `LOITER` or `RTL` built on that estimate, the drift becomes a
+steadily growing error in where the aircraft believes it is.
+
+This is an argument for external navigation, but not the one previously given.
+With `EK3_SRC*` the EKF knows an external-nav source has gone away and the
+source-set mechanism is the one intended for handling it. With `GPS_INPUT` the
+loss is indistinguishable from a GNSS dropout that nothing is watching for.
+
+**Either way, ArduPilot will not protect us here.** The behaviour on losing
+visual position has to be ours: a failsafe implemented on our side, which
+detects that all three navigation tiers have run out and commands something
+deliberate rather than letting the aircraft coast quietly. That work is not yet
+written. See [navigation-tiers.md](navigation-tiers.md) for the tiers it would
+sit on top of.
 
 ## What has been verified, and what has not
 
@@ -81,35 +101,60 @@ lost. With external navigation the EKF handles source loss through
   external navigation **can** be an absolute position source, which optical
   flow cannot (flow appears only under `VELXY`).
 
-**Not verified, and each one blocks the switch:**
+The five questions this document originally listed as open have since been
+checked against ArduPilot source. Four came back in favour of external
+navigation. The fifth found a blocker that has nothing to do with the choice of
+message.
 
-1. **Does ArduPlane fuse external navigation for navigation, not just logging?**
-   The official docs state non-GPS navigation "is not applicable to fast or high
-   flying vehicles such as conventional Planes." That sentence is about
-   flow-based, close-to-the-ground operation, and may not bind an absolute
-   position source — but it has not been checked against the code path.
-2. **The `VISO_*` parameters.** Names, units and sign conventions for the sensor
-   offset and the measurement delay must be read from source, not assumed. A
-   wrong delay is a position error proportional to speed: at 22 m/s, 100 ms is
-   2.2 m.
-3. **Is ~0.8 Hz acceptable?** Our fix rate is roughly one per 1.26 s. External
-   navigation is normally fed by a VIO system at tens of hertz. Whether EKF3
-   accepts a source this slow as its primary absolute position, and what it does
-   between updates, needs checking.
-4. **Covariance units and ordering** in `VISION_POSITION_ESTIMATE` — the field
-   is a packed upper triangle, and the convention must be read from the message
-   definition rather than inferred.
-5. **Which is better of the two external messages**, `ODOMETRY` or
-   `VISION_POSITION_ESTIMATE`, given that we have position and a usable yaw but
-   velocity only indirectly.
+1. **Does ArduPlane fuse external navigation for navigation, not just logging?
+   Yes.** `AP_VisualOdom` is gated only by flash-size macros
+   (`HAL_VISUALODOM_ENABLED`, `EK3_FEATURE_EXTERNAL_NAV`) — there is no
+   vehicle-type gating anywhere in the fusion path, so a plane build that
+   compiles it in fuses it exactly as a copter build does. The documentation
+   sentence about "fast or high flying vehicles" is about optical-flow
+   operation close to the ground, and does not bind an absolute position source.
+2. **The `VISO_*` parameters.** `VISO_DELAY_MS` defaults to **10 ms** with a
+   documented maximum of 250. Our pipeline's latency is far above the default,
+   so this must be set, not left alone. There is a trap above it:
+   `JitterCorrection` carries `max_lag_ms = 500` and **clamps silently** — a
+   delay larger than that is discarded without a warning.
+3. **Is ~0.8 Hz acceptable? No, and this is the real blocker.**
+   `AP_VISUALODOM_TIMEOUT_MS` is **300 ms**. At one fix per 1.26 s the source is
+   considered unhealthy almost all of the time, which fails the arming check —
+   the aircraft will not arm. Raising the fix rate above ~3 Hz is a prerequisite
+   for external navigation, independent of which message is used.
+4. **Covariance is accepted but mostly discarded.** `VISION_POSITION_ESTIMATE`
+   does carry a 6×6 packed upper triangle, and ArduPilot does read it — but it
+   collapses the whole matrix to a single scalar,
+   `sqrt(var_x + var_y + var_z)`. So the honest per-axis sigma still cannot be
+   expressed. It is a real improvement on `hdop` (metres, not a dimensionless
+   geometry factor) but far less than the message format suggests.
+5. **`VISION_POSITION_ESTIMATE`, not `ODOMETRY`.** We have position and a
+   usable yaw; velocity only indirectly. `ODOMETRY` additionally expects twist,
+   which we would be inventing — the same mistake as the fabricated satellite
+   count.
+
+**A separate blocker, found while checking the above:** `ArduPlane/takeoff.cpp`
+hard-requires a real `AP_GPS` 3D fix for an `AUTO` takeoff, and that check
+looks at the GPS driver directly, not at the EKF's position source. External
+navigation cannot satisfy it. So an external-nav aircraft cannot use AUTO
+takeoff — it must be launched in a manual mode and switched afterwards. Notably
+**`GPS_INPUT` does satisfy this check**, because it presents itself as a GPS
+driver. This is the one concrete operational advantage GPS_INPUT has, and it is
+a consequence of the same misrepresentation §1 objects to.
+
+Switching sources in flight does not need Lua: `RCx_OPTION = 90` assigns a
+transmitter switch to the EK3 source set, so an operator can move between a
+GPS-backed and an external-nav source set directly.
 
 ## Recommendation
 
-On a board with `EK3_FEATURE_EXTERNAL_NAV` compiled in, external navigation is
-the correct interface and `gps_input` should be treated as the compatibility
-fallback it is. The code already supports all three; this is a configuration
-change plus the verification above, not new development.
+On a board with `EK3_FEATURE_EXTERNAL_NAV` compiled in,
+`VISION_POSITION_ESTIMATE` is the correct interface, and `gps_input` should be
+treated as the compatibility fallback it is.
 
-Until points 1–5 are checked against ArduPilot source, the default stays as it
-is. Shipping a default that is semantically right and functionally unverified
-would be worse than shipping one that is semantically wrong and known to work.
+**But the default stays `gps_input`, and now for a measured reason rather than
+an unverified one: our fix rate.** At ~0.8 Hz the 300 ms health timeout keeps
+the aircraft from arming. The switch is gated on raising the fix rate above
+~3 Hz, not on further source reading. The semantic objections in §1–§4 all
+stand; they are simply not yet actionable.
