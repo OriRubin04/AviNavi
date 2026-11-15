@@ -155,6 +155,7 @@ class FrameToFrameOdometry:
         #: Ground speed from the last successful estimate, for predicting how
         #: far the next frame will have moved.
         self._last_speed_mps: Optional[float] = None
+        self._last_track_rad: Optional[float] = None
 
         self._previous_gray = None
         self._previous_points = None
@@ -193,6 +194,7 @@ class FrameToFrameOdometry:
         self._previous_points = None
         self._previous_state = None
         self._last_speed_mps = None
+        self._last_track_rad = None
 
     # -- the cycle ----------------------------------------------------------
     def update(
@@ -262,6 +264,9 @@ class FrameToFrameOdometry:
         tracked, previous_kept = self._track(
             cv2, previous_gray, gray, previous_points,
             expected_px=self._expected_displacement_px(previous_state, state, scale),
+            predicted=self._predict_pixels(
+                previous_points, previous_state, state, scale
+            ),
         )
         if tracked is None or tracked.shape[0] < self.min_points:
             LOG.debug(
@@ -334,6 +339,79 @@ class FrameToFrameOdometry:
         gsd = height / fx
         return (speed * dt / gsd) * float(scale)
 
+    def _predict_pixels(self, pixels, previous_state, state, scale: float):
+        """Where each tracked point should land, from the attitude change alone.
+
+        Lucas-Kanade models the motion of a window as pure translation. Over a
+        banked turn that is false: the aircraft yaws, so the image rotates, and
+        the ground plane's perspective shifts with the roll. At 30 degrees of
+        bank the turn rate is about 15 deg/s, so 0.2 s between frames rotates
+        the image by ~3 degrees - which moves a point 300 px from the centre by
+        15 px *tangentially*, on top of the translation, in a direction the
+        tracker's model cannot represent.
+
+        Measured consequence before this existed, at 240 m on a racetrack:
+
+            bank  0-9 deg   29% of cycles accepted
+            bank 10-19 deg   0%
+            bank 20-29 deg   0%
+
+        Every banked frame failed, and they are the frames a turning aircraft
+        spends much of its time in.
+
+        But the attitude of both frames is known, so this motion is predictable
+        rather than something the tracker has to discover. Each point is
+        projected to the ground with the previous pose and re-projected with
+        the current one; the translation between the two cameras is left for
+        Lucas-Kanade to find, which is the part it is good at. Handing it the
+        prediction as a starting point turns a 15 px rotational displacement
+        into a sub-pixel residual.
+
+        Returns ``None`` when the geometry is unusable, in which case the
+        caller tracks without a prediction exactly as before.
+        """
+        from .prewarp import FramePrewarper  # noqa: PLC0415 - avoids a cycle
+
+        if previous_state is None or state is None or scale <= 0.0:
+            return None
+        R_previous, height_previous, _ = previous_state
+        R_current, height_current, _ = state
+        if height_previous <= 0.0 or height_current <= 0.0:
+            return None
+
+        K = self._intrinsics()
+        full = pixels.reshape(-1, 2) / scale
+        ground = FramePrewarper._project_to_ground(full, K, R_previous, height_previous)
+        if ground is None:
+            return None
+
+        # Ground points as rays from the current camera, including a predicted
+        # translation from the last measured speed and heading.
+        north_step = east_step = 0.0
+        if self._last_speed_mps:
+            dt = state[2] - previous_state[2]
+            if dt > 0.0:
+                step = self._last_speed_mps * dt
+                north_step = step * math.cos(self._last_track_rad or 0.0)
+                east_step = step * math.sin(self._last_track_rad or 0.0)
+        rays_ned = np.column_stack(
+            [
+                ground[:, 0] - north_step,
+                ground[:, 1] - east_step,
+                np.full(ground.shape[0], height_current),
+            ]
+        )
+        rays_camera = (R_current.T @ rays_ned.T).T
+        depth = rays_camera[:, 2]
+        if np.any(depth <= 1e-6) or not np.all(np.isfinite(depth)):
+            return None
+        projected = (K @ (rays_camera / depth[:, None]).T).T[:, :2]
+        if not np.all(np.isfinite(projected)):
+            return None
+        return np.ascontiguousarray(
+            (projected * scale).reshape(pixels.shape).astype(np.float32)
+        )
+
     def _pyramid_levels_for(self, expected_px: Optional[float]) -> int:
         """How deep a pyramid this displacement needs - no deeper.
 
@@ -363,7 +441,8 @@ class FrameToFrameOdometry:
         needed = math.ceil(math.log2(max(expected_px, 1.0) / float(self.lk_window_px)))
         return int(min(self.max_pyramid_levels, max(configured, needed)))
 
-    def _track(self, cv2, previous_gray, gray, previous_points, expected_px=None):
+    def _track(self, cv2, previous_gray, gray, previous_points, expected_px=None,
+               predicted=None):
         """Forward-backward Lucas-Kanade.
 
         The backward check is what makes this usable over repetitive ground -
@@ -375,10 +454,17 @@ class FrameToFrameOdometry:
         criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 20, 0.03)
         window = (self.lk_window_px, self.lk_window_px)
         levels = self._pyramid_levels_for(expected_px)
-        forward, status, _err = cv2.calcOpticalFlowPyrLK(
-            previous_gray, gray, previous_points, None,
-            winSize=window, maxLevel=levels, criteria=criteria,
-        )
+        if predicted is not None and predicted.shape == previous_points.shape:
+            forward, status, _err = cv2.calcOpticalFlowPyrLK(
+                previous_gray, gray, previous_points, predicted.copy(),
+                winSize=window, maxLevel=levels, criteria=criteria,
+                flags=cv2.OPTFLOW_USE_INITIAL_FLOW,
+            )
+        else:
+            forward, status, _err = cv2.calcOpticalFlowPyrLK(
+                previous_gray, gray, previous_points, None,
+                winSize=window, maxLevel=levels, criteria=criteria,
+            )
         if forward is None or status is None:
             return (None, None)
         ok = status.reshape(-1).astype(bool)
@@ -456,6 +542,7 @@ class FrameToFrameOdometry:
             rotation_rad=self._rotation(ground_previous[keep], ground_current[keep]),
         )
         self._last_speed_mps = delta.speed_mps
+        self._last_track_rad = math.atan2(delta.east_m, delta.north_m)
 
         if delta.speed_mps > self.max_speed_mps:
             LOG.warning(
