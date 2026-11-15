@@ -155,7 +155,6 @@ class FrameToFrameOdometry:
         #: Ground speed from the last successful estimate, for predicting how
         #: far the next frame will have moved.
         self._last_speed_mps: Optional[float] = None
-        self._last_track_rad: Optional[float] = None
 
         self._previous_gray = None
         self._previous_points = None
@@ -194,7 +193,6 @@ class FrameToFrameOdometry:
         self._previous_points = None
         self._previous_state = None
         self._last_speed_mps = None
-        self._last_track_rad = None
 
     # -- the cycle ----------------------------------------------------------
     def update(
@@ -261,13 +259,32 @@ class FrameToFrameOdometry:
         if dt <= 0.0:
             return None
 
+        # Remove the rotation from the imagery before tracking, so that what
+        # is left for Lucas-Kanade is the translation it can actually model.
+        # Both the frame and the points it is tracking from have to move, or
+        # the points no longer sit on the features they were detected at.
+        search_gray = previous_gray
+        search_points = previous_points
+        homography = self._derotation_homography(previous_state, state, scale)
+        if homography is not None:
+            warped_gray, warped_points = self._derotate(
+                cv2, previous_gray, previous_points, homography
+            )
+            if warped_points is not None and warped_points.shape[0] >= self.min_points:
+                search_gray = warped_gray
+                search_points = warped_points
+
         tracked, previous_kept = self._track(
-            cv2, previous_gray, gray, previous_points,
+            cv2, search_gray, gray, search_points,
             expected_px=self._expected_displacement_px(previous_state, state, scale),
-            predicted=self._predict_pixels(
-                previous_points, previous_state, state, scale
-            ),
         )
+        if tracked is not None and search_points is not previous_points:
+            # The displacement must be measured against where the features
+            # really were, not against where the de-rotation put them, so map
+            # the surviving start points back through the inverse.
+            previous_kept = self._unwarp(cv2, previous_kept, homography)
+            if previous_kept is None:
+                return None
         if tracked is None or tracked.shape[0] < self.min_points:
             LOG.debug(
                 "visual odometry: only %d points survived tracking (need %d)",
@@ -339,78 +356,118 @@ class FrameToFrameOdometry:
         gsd = height / fx
         return (speed * dt / gsd) * float(scale)
 
-    def _predict_pixels(self, pixels, previous_state, state, scale: float):
-        """Where each tracked point should land, from the attitude change alone.
+    @staticmethod
+    def _derotate(cv2, gray, points, homography):
+        """Warp a frame and its feature points by the same transform.
 
-        Lucas-Kanade models the motion of a window as pure translation. Over a
-        banked turn that is false: the aircraft yaws, so the image rotates, and
-        the ground plane's perspective shifts with the roll. At 30 degrees of
-        bank the turn rate is about 15 deg/s, so 0.2 s between frames rotates
-        the image by ~3 degrees - which moves a point 300 px from the centre by
-        15 px *tangentially*, on top of the translation, in a direction the
-        tracker's model cannot represent.
+        Points that land outside the warped frame are dropped: there is no
+        image there to track from. The margin keeps a full search window
+        inside the border.
+        """
+        warped = cv2.warpPerspective(gray, homography, (gray.shape[1], gray.shape[0]))
+        flat = points.reshape(-1, 2).astype(np.float32)
+        moved = cv2.perspectiveTransform(flat.reshape(-1, 1, 2), homography)
+        moved = moved.reshape(-1, 2)
+        margin = 20.0
+        inside = (
+            (moved[:, 0] > margin)
+            & (moved[:, 0] < gray.shape[1] - margin)
+            & (moved[:, 1] > margin)
+            & (moved[:, 1] < gray.shape[0] - margin)
+        )
+        if not inside.any():
+            return warped, None
+        return warped, np.ascontiguousarray(moved[inside].astype(np.float32))
 
-        Measured consequence before this existed, at 240 m on a racetrack:
+    @staticmethod
+    def _unwarp(cv2, points, homography):
+        """Map de-rotated points back to their true position in the old frame."""
+        if points is None or points.size == 0:
+            return None
+        try:
+            inverse = np.linalg.inv(homography)
+        except np.linalg.LinAlgError:
+            return None
+        flat = points.reshape(-1, 2).astype(np.float32)
+        back = cv2.perspectiveTransform(flat.reshape(-1, 1, 2), inverse)
+        return np.ascontiguousarray(back.reshape(-1, 2).astype(np.float32))
 
-            bank  0-9 deg   29% of cycles accepted
-            bank 10-19 deg   0%
-            bank 20-29 deg   0%
+    def _derotation_homography(self, previous_state, state, scale: float):
+        """Maps the previous frame onto the current frame's orientation.
 
-        Every banked frame failed, and they are the frames a turning aircraft
-        spends much of its time in.
+        Lucas-Kanade models each window's motion as pure translation. In a turn
+        that is false: the aircraft yaws, so the image rotates, and the ground
+        plane's perspective shifts with the roll. The displacement is not the
+        problem - 11 to 27 px sits comfortably inside a 31 px window - the
+        problem is that the content *inside* each window shears. At 15 deg/s
+        and 0.2 s between frames, content 15 px from a window's centre moves
+        0.8 px relative to its centre, and a translation-only model cannot
+        represent that. Predicting where the window should go does not help,
+        which was measured: it bought two points of acceptance.
 
-        But the attitude of both frames is known, so this motion is predictable
-        rather than something the tracker has to discover. Each point is
-        projected to the ground with the previous pose and re-projected with
-        the current one; the translation between the two cameras is left for
-        Lucas-Kanade to find, which is the part it is good at. Handing it the
-        prediction as a starting point turns a 15 px rotational displacement
-        into a sub-pixel residual.
+        Removing the rotation from the imagery does help. Measured median
+        points surviving the tracker, before changing any code:
+
+            level, straight            36 -> 34   (-2, noise)
+            banked 20, turning 10/s    20 -> 26   (+6)
+            banked 30, turning 15/s    11 -> 48   (+37, 4.4x)
+
+        It helps where the problem is and costs nothing where there is none.
+
+        The transform is built from the four image corners projected to the
+        ground with the previous pose and re-projected with the current one,
+        which is the plane-induced homography between the two orientations.
+        Translation is deliberately left out: it is the unknown the tracker is
+        for, and it does not shear a window, it only moves it.
+
+        This is standard practice - de-rotating before matching is what
+        RaD-VIO does with its gyro, and Caballero's medium-to-high-altitude
+        work builds its odometry on the plane homography rather than on
+        averaged per-point translations.
 
         Returns ``None`` when the geometry is unusable, in which case the
-        caller tracks without a prediction exactly as before.
+        caller tracks the unwarped frame exactly as before.
         """
         from .prewarp import FramePrewarper  # noqa: PLC0415 - avoids a cycle
 
+        cv2 = _require_cv2()
         if previous_state is None or state is None or scale <= 0.0:
             return None
         R_previous, height_previous, _ = previous_state
         R_current, height_current, _ = state
         if height_previous <= 0.0 or height_current <= 0.0:
             return None
-
-        K = self._intrinsics()
-        full = pixels.reshape(-1, 2) / scale
-        ground = FramePrewarper._project_to_ground(full, K, R_previous, height_previous)
-        if ground is None:
+        width = int(round(self.cx * 2.0)) if self.cx else 0
+        height = int(round(self.cy * 2.0)) if self.cy else 0
+        if width <= 1 or height <= 1:
             return None
 
-        # Ground points as rays from the current camera, including a predicted
-        # translation from the last measured speed and heading.
-        north_step = east_step = 0.0
-        if self._last_speed_mps:
-            dt = state[2] - previous_state[2]
-            if dt > 0.0:
-                step = self._last_speed_mps * dt
-                north_step = step * math.cos(self._last_track_rad or 0.0)
-                east_step = step * math.sin(self._last_track_rad or 0.0)
+        K = self._intrinsics()
+        corners = np.float32(
+            [[0, 0], [width - 1, 0], [width - 1, height - 1], [0, height - 1]]
+        )
+        ground = FramePrewarper._project_to_ground(
+            corners, K, R_previous, height_previous
+        )
+        if ground is None:
+            return None
         rays_ned = np.column_stack(
-            [
-                ground[:, 0] - north_step,
-                ground[:, 1] - east_step,
-                np.full(ground.shape[0], height_current),
-            ]
+            [ground[:, 0], ground[:, 1], np.full(ground.shape[0], height_current)]
         )
         rays_camera = (R_current.T @ rays_ned.T).T
         depth = rays_camera[:, 2]
         if np.any(depth <= 1e-6) or not np.all(np.isfinite(depth)):
             return None
-        projected = (K @ (rays_camera / depth[:, None]).T).T[:, :2]
-        if not np.all(np.isfinite(projected)):
+        destination = (K @ (rays_camera / depth[:, None]).T).T[:, :2]
+        if not np.all(np.isfinite(destination)):
             return None
-        return np.ascontiguousarray(
-            (projected * scale).reshape(pixels.shape).astype(np.float32)
-        )
+        try:
+            return cv2.getPerspectiveTransform(
+                (corners * scale).astype(np.float32),
+                (destination * scale).astype(np.float32),
+            )
+        except cv2.error:
+            return None
 
     def _pyramid_levels_for(self, expected_px: Optional[float]) -> int:
         """How deep a pyramid this displacement needs - no deeper.
@@ -441,8 +498,7 @@ class FrameToFrameOdometry:
         needed = math.ceil(math.log2(max(expected_px, 1.0) / float(self.lk_window_px)))
         return int(min(self.max_pyramid_levels, max(configured, needed)))
 
-    def _track(self, cv2, previous_gray, gray, previous_points, expected_px=None,
-               predicted=None):
+    def _track(self, cv2, previous_gray, gray, previous_points, expected_px=None):
         """Forward-backward Lucas-Kanade.
 
         The backward check is what makes this usable over repetitive ground -
@@ -454,17 +510,10 @@ class FrameToFrameOdometry:
         criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 20, 0.03)
         window = (self.lk_window_px, self.lk_window_px)
         levels = self._pyramid_levels_for(expected_px)
-        if predicted is not None and predicted.shape == previous_points.shape:
-            forward, status, _err = cv2.calcOpticalFlowPyrLK(
-                previous_gray, gray, previous_points, predicted.copy(),
-                winSize=window, maxLevel=levels, criteria=criteria,
-                flags=cv2.OPTFLOW_USE_INITIAL_FLOW,
-            )
-        else:
-            forward, status, _err = cv2.calcOpticalFlowPyrLK(
-                previous_gray, gray, previous_points, None,
-                winSize=window, maxLevel=levels, criteria=criteria,
-            )
+        forward, status, _err = cv2.calcOpticalFlowPyrLK(
+            previous_gray, gray, previous_points, None,
+            winSize=window, maxLevel=levels, criteria=criteria,
+        )
         if forward is None or status is None:
             return (None, None)
         ok = status.reshape(-1).astype(bool)
@@ -542,7 +591,6 @@ class FrameToFrameOdometry:
             rotation_rad=self._rotation(ground_previous[keep], ground_current[keep]),
         )
         self._last_speed_mps = delta.speed_mps
-        self._last_track_rad = math.atan2(delta.east_m, delta.north_m)
 
         if delta.speed_mps > self.max_speed_mps:
             LOG.warning(

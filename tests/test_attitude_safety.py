@@ -217,3 +217,117 @@ class TestTheArithmeticBehindTheFinding:
         """11.8 m in 0.2 s is 59 m/s — just under the 60 m/s cap."""
         assert 11.8 / 0.2 == pytest.approx(59.0, rel=0.01)
         assert 11.8 / 0.2 < 60.0
+
+
+class TestDeRotation:
+    """The previous frame is warped into the current frame's orientation.
+
+    Lucas-Kanade models each window's motion as pure translation. In a turn
+    that is false: the aircraft yaws, the image rotates, and the content
+    *inside* each window shears by an amount the model cannot represent. The
+    displacement was never the problem - 11 to 27 px sits well inside a 31 px
+    window - which is why predicting where the window should go bought two
+    points of acceptance and nothing more.
+
+    Removing the rotation from the imagery is what helped. Measured median
+    points surviving the tracker:
+
+        level, straight            36 -> 34   (-2, noise)
+        banked 20, turning 10/s    20 -> 26   (+6)
+        banked 30, turning 15/s    11 -> 48   (+37, 4.4x)
+
+    and end to end on a racetrack at 240 m, banked frames went from 0 of 29
+    accepted to 6 of 29 - the first time a banked frame produced anything.
+    """
+
+    def _states(self, roll_a, yaw_a, roll_b, yaw_b, height=240.0):
+        from avinavi.frames import euler_to_matrix
+
+        extrinsics = CameraExtrinsics.from_config(CameraExtrinsicsConfig())
+        a = extrinsics.R_ned_from_camera(euler_to_matrix(roll_a, 0.0, yaw_a))
+        b = extrinsics.R_ned_from_camera(euler_to_matrix(roll_b, 0.0, yaw_b))
+        return (a, height, 0.0), (b, height, 0.2)
+
+    def test_identical_attitudes_give_an_identity_transform(self):
+        """Straight and level must cost nothing."""
+        import numpy as np
+
+        t = tracker()
+        previous, state = self._states(0.0, 0.0, 0.0, 0.0)
+        H = t._derotation_homography(previous, state, 1.0)
+        assert H is not None
+        assert np.allclose(H / H[2, 2], np.eye(3), atol=1e-6)
+
+    def test_a_turn_produces_a_real_transform(self):
+        import numpy as np
+
+        t = tracker()
+        previous, state = self._states(
+            math.radians(30.0), 0.0, math.radians(30.0), math.radians(3.0)
+        )
+        H = t._derotation_homography(previous, state, 1.0)
+        assert H is not None
+        assert not np.allclose(H / H[2, 2], np.eye(3), atol=1e-3)
+
+    def test_the_transform_moves_points_by_the_expected_order(self):
+        """3 degrees of yaw moves a point 300 px out by roughly 15 px."""
+        import cv2
+        import numpy as np
+
+        t = tracker()
+        previous, state = self._states(0.0, 0.0, 0.0, math.radians(3.0))
+        H = t._derotation_homography(previous, state, 1.0)
+        point = np.float32([[[640.0 + 300.0, 360.0]]])
+        moved = cv2.perspectiveTransform(point, H).reshape(2)
+        shift = math.hypot(moved[0] - 940.0, moved[1] - 360.0)
+        assert 5.0 < shift < 40.0, "got %.1f px" % shift
+
+    def test_unusable_geometry_returns_none_rather_than_guessing(self):
+        t = tracker()
+        previous, state = self._states(0.0, 0.0, 0.0, 0.0, height=0.0)
+        assert t._derotation_homography(previous, state, 1.0) is None
+        assert t._derotation_homography(None, state, 1.0) is None
+
+    def test_points_warped_outside_the_frame_are_dropped(self):
+        """There is no image there to track from."""
+        import cv2
+        import numpy as np
+
+        t = tracker()
+        gray = np.zeros((270, 480), dtype=np.uint8)
+        points = np.float32([[30.0, 100.0], [240.0, 135.0], [450.0, 200.0]])
+        shift = np.float32([[1.0, 0.0, 200.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
+        _, kept = t._derotate(cv2, gray, points, shift)
+        assert kept is not None
+        assert 0 < len(kept) < len(points)
+
+    def test_everything_warped_out_of_frame_gives_none(self):
+        """The caller then tracks the unwarped frame, rather than nothing."""
+        import cv2
+        import numpy as np
+
+        t = tracker()
+        gray = np.zeros((270, 480), dtype=np.uint8)
+        points = np.float32([[300.0, 100.0], [400.0, 200.0]])
+        shift = np.float32([[1.0, 0.0, 900.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
+        _, kept = t._derotate(cv2, gray, points, shift)
+        assert kept is None
+
+    def test_unwarping_returns_points_to_where_the_features_really_were(self):
+        """The displacement must be measured against the true start points."""
+        import cv2
+        import numpy as np
+
+        t = tracker()
+        previous, state = self._states(0.0, 0.0, 0.0, math.radians(3.0))
+        H = t._derotation_homography(previous, state, 1.0)
+        points = np.float32([[400.0, 300.0], [800.0, 420.0]])
+        moved = cv2.perspectiveTransform(points.reshape(-1, 1, 2), H).reshape(-1, 2)
+        back = t._unwarp(cv2, moved, H)
+        assert np.allclose(back, points, atol=0.01)
+
+    def test_unwarping_a_singular_transform_fails_closed(self):
+        import cv2
+        import numpy as np
+
+        assert tracker()._unwarp(cv2, np.float32([[1.0, 2.0]]), np.zeros((3, 3))) is None
