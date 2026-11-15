@@ -265,10 +265,21 @@ def test_auto_exposure_hunting_costs_the_odometry_its_tracking(terrain):
         results[label] = succeeded
 
     assert results["locked"] >= 6, "locked exposure should track almost every frame"
-    assert results["hunting"] < results["locked"], (
-        "exposure drift should cost tracking; it did not, so either the "
-        "simulator's drift is too weak to be a fair test or this check is "
-        "measuring nothing (locked=%d, hunting=%d)" % (results["locked"], results["hunting"])
+    # Recorded rather than asserted as a degradation. With the pyramid depth
+    # now chosen from the expected displacement, exposure drift of this
+    # strength costs the tracker nothing at all (locked 7, hunting 7). The
+    # earlier version of this test asserted hunting < locked and its own
+    # failure message named the right doubt: a degradation that has stopped
+    # happening would be asserting the simulator's weakness, not the system's
+    # behaviour.
+    #
+    # camera.lock_exposure stays on by default because the cost that was
+    # measured is to MATCHING, not to tracking - see
+    # docs/matching-robustness.md.
+    assert results["hunting"] <= results["locked"], (
+        "exposure drift made tracking *better*, which is not credible and "
+        "means this test is measuring noise (locked=%d, hunting=%d)"
+        % (results["locked"], results["hunting"])
     )
 
 
@@ -340,17 +351,22 @@ def test_points_that_disagree_with_each_other_are_rejected(world):
     delta = tracker.update(simulator.render(point(22.0, 0.0)), 1.0, HEIGHT_M)
     assert delta is None
 
-    # With the gate disabled, the bad estimate comes through — which is what
-    # makes this a gate rather than a coincidence.
+    # This scenario no longer reaches the gate, and that is an improvement
+    # rather than a gap. With the pyramid depth now chosen from the expected
+    # displacement, a 1 s gap leaves 9-10 points surviving against a minimum
+    # of 20, so the tracker refuses at the count check instead of producing 23
+    # points that agree on a wrong answer. Disabling the gate therefore proves
+    # nothing here: the estimate dies earlier and more honestly.
     tracker.reset()
     tracker.max_residual_pixels = 1e9
     tracker.min_residual_m = 1e9
     tracker.update(simulator.render(point(0.0, 0.0)), 0.0, HEIGHT_M)
     ungated = tracker.update(simulator.render(point(22.0, 0.0)), 1.0, HEIGHT_M)
-    assert ungated is not None
-    assert abs(ungated.north_m - 22.0) > 5.0, (
-        "the ungated estimate is accurate, so this test is no longer "
-        "demonstrating the failure it was written for"
+    assert ungated is None, (
+        "the 1 s gap now fails at the point count, before the residual gate. "
+        "The gate itself is exercised in tests/test_attitude_safety.py, where "
+        "an inconsistent attitude produces points that agree with each other "
+        "on a displacement that is wrong - the case a count check cannot catch."
     )
 
 

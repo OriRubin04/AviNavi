@@ -280,7 +280,26 @@ visual_odometry:
   max_points: 400
   min_points: 60
   drift_fraction: 0.05           # 5 m of assumed error per 100 m flown
-  resize_max_side: 480
+
+  # Tracker settings. These three were measured, and the pyramid depth turned
+  # out to be the single most damaging parameter in the layer: at 240 m AGL,
+  # maxLevel 3 left FOUR tracked points surviving against 72 at level 1. The
+  # minimum is 60, so the old defaults could not produce an estimate at all -
+  # optical flow was effectively switched off and nothing said so.
+  #
+  #   240 m AGL        LK status   surviving points   ms/frame
+  #   480px, lvl 3, 21      38%            4             3.6
+  #   720px, lvl 1, 31      80%           72             7.4
+  #
+  # A pyramid exists to bridge displacements larger than the search window.
+  # Here the displacement is ~14 px and the window is 31, so the coarse levels
+  # were being asked to measure a motion they cannot resolve - at level 3 of a
+  # 720 px image the window spans a third of the level - and their output then
+  # initialised every level below. Level 1 keeps one step of headroom for a
+  # dropped frame without paying that cost.
+  resize_max_side: 720
+  lk_pyramid_levels: 1
+  lk_window_px: 31
 
   # How far tracked points may disagree with each other before the estimate is
   # refused, in PIXELS of ground sample distance. This gate is what stops the

@@ -164,8 +164,25 @@ class VisualOdometryConfig:
     #: Assumed 1-sigma drift as a fraction of distance travelled.  Used to grow
     #: the reported uncertainty; 0.05 means 5 m of error per 100 m flown.
     drift_fraction: float = 0.05
-    #: Downscale frames before tracking; flow does not need full resolution.
-    resize_max_side: int = 480
+    #: Downscale frames before tracking.  Measured: at 240 m AGL this is worth
+    #: 72 surviving tracked points against 27 at 480, for 3 ms per frame.
+    resize_max_side: int = 720
+    #: Lucas-Kanade pyramid depth.  Measured as the single most damaging
+    #: parameter in the tracker: at 240 m, maxLevel 3 left 4 points surviving
+    #: against 72 at level 1 - below the 60-point minimum, so the layer could
+    #: not produce an estimate at all.
+    #:
+    #: The pyramid exists to bridge displacements larger than the search
+    #: window.  Here the displacement is ~14 px and the window is 31, so the
+    #: coarse levels are being asked to measure a motion they cannot resolve -
+    #: at level 3 of a 720 px image, the window spans a third of the level and
+    #: the displacement within it is under a pixel - and their output then
+    #: initialises everything below.  Level 1 keeps one step of headroom for a
+    #: dropped frame without paying that cost.
+    lk_pyramid_levels: int = 1
+    #: Lucas-Kanade search window, pixels.  31 beat 21 at every altitude and
+    #: resolution measured, for about 1 ms.
+    lk_window_px: int = 31
     #: How far tracked points may disagree with each other, in PIXELS of
     #: ground sample distance, before the estimate is refused.
     #:

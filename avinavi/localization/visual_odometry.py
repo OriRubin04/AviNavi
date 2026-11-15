@@ -130,6 +130,12 @@ class FrameToFrameOdometry:
         max_residual_pixels: float = 4.0,
         #: Floor, so that a very low pass does not make the gate impossible.
         min_residual_m: float = 0.25,
+        #: Lucas-Kanade pyramid depth and search window.  See the config for
+        #: the measurement behind the defaults.
+        lk_pyramid_levels: int = 1,
+        lk_window_px: int = 31,
+        #: Ceiling on the adaptive depth; 3 bridges about 8 windows.
+        max_pyramid_levels: int = 3,
     ) -> None:
         self.extrinsics = extrinsics
         self.fx = fx
@@ -143,6 +149,12 @@ class FrameToFrameOdometry:
         self.max_speed_mps = float(max_speed_mps)
         self.max_residual_pixels = float(max_residual_pixels)
         self.min_residual_m = float(min_residual_m)
+        self.lk_pyramid_levels = max(0, int(lk_pyramid_levels))
+        self.lk_window_px = max(5, int(lk_window_px))
+        self.max_pyramid_levels = max(0, int(max_pyramid_levels))
+        #: Ground speed from the last successful estimate, for predicting how
+        #: far the next frame will have moved.
+        self._last_speed_mps: Optional[float] = None
 
         self._previous_gray = None
         self._previous_points = None
@@ -159,6 +171,8 @@ class FrameToFrameOdometry:
                 resize_max_side=config.resize_max_side,
                 max_residual_pixels=getattr(config, "max_residual_pixels", 4.0),
                 min_residual_m=getattr(config, "min_residual_m", 0.25),
+                lk_pyramid_levels=getattr(config, "lk_pyramid_levels", 1),
+                lk_window_px=getattr(config, "lk_window_px", 31),
             )
         return cls(
             extrinsics=extrinsics,
@@ -178,6 +192,7 @@ class FrameToFrameOdometry:
         self._previous_gray = None
         self._previous_points = None
         self._previous_state = None
+        self._last_speed_mps = None
 
     # -- the cycle ----------------------------------------------------------
     def update(
@@ -244,7 +259,10 @@ class FrameToFrameOdometry:
         if dt <= 0.0:
             return None
 
-        tracked, previous_kept = self._track(cv2, previous_gray, gray, previous_points)
+        tracked, previous_kept = self._track(
+            cv2, previous_gray, gray, previous_points,
+            expected_px=self._expected_displacement_px(previous_state, state, scale),
+        )
         if tracked is None or tracked.shape[0] < self.min_points:
             LOG.debug(
                 "visual odometry: only %d points survived tracking (need %d)",
@@ -288,7 +306,64 @@ class FrameToFrameOdometry:
             return None
         return points.reshape(-1, 2).astype(np.float32)
 
-    def _track(self, cv2, previous_gray, gray, previous_points):
+    def _expected_displacement_px(self, previous_state, state, scale: float):
+        """How far the ground will have moved between these two frames, in the
+        tracker's working pixels.
+
+        From the last measured ground speed and the actual time between the
+        frames, converted through the ground sample distance. ``None`` before
+        the first successful estimate, when there is nothing to predict from.
+        """
+        if previous_state is None:
+            return None
+        # With no prior estimate - the first pair, or the first after a map fix
+        # resets the tracker - assume the airframe's limit rather than nothing.
+        # A pyramid that is too deep costs accuracy on a small displacement; a
+        # pyramid that is too shallow loses the frame entirely on a large one,
+        # and "we do not know yet" is exactly when a large one is possible.
+        speed = self._last_speed_mps
+        if speed is None:
+            speed = self.max_speed_mps
+        dt = state[2] - previous_state[2]
+        if dt <= 0.0:
+            return None
+        fx = float(self.fx or 0.0)
+        height = float(state[1])
+        if fx <= 0.0 or height <= 0.0:
+            return None
+        gsd = height / fx
+        return (speed * dt / gsd) * float(scale)
+
+    def _pyramid_levels_for(self, expected_px: Optional[float]) -> int:
+        """How deep a pyramid this displacement needs - no deeper.
+
+        A pyramid exists to bridge a displacement larger than the search
+        window: each level halves the apparent motion. Levels beyond that are
+        not free, they are harmful, because the coarse levels are then asked to
+        measure a motion they cannot resolve and their answer initialises every
+        level below.
+
+        Measured at 240 m AGL, where the displacement is ~14 px against a 31 px
+        window and no pyramid is needed at all:
+
+            maxLevel 3 ->  4 points surviving   (below the 60-point minimum)
+            maxLevel 1 -> 72 points surviving
+
+        But a fixed shallow pyramid is wrong in the other direction. After a
+        dropped frame the gap doubles, and at 120 m a 0.5 s gap is 102 px -
+        which level 1 cannot bridge, and which measured as a total failure.
+
+        So the depth follows the displacement, which is the quantity the
+        pyramid is for. ``expected_px`` of ``None`` means the caller has no
+        estimate yet, and the configured depth is used as-is.
+        """
+        configured = self.lk_pyramid_levels
+        if not expected_px or expected_px <= 0.0:
+            return configured
+        needed = math.ceil(math.log2(max(expected_px, 1.0) / float(self.lk_window_px)))
+        return int(min(self.max_pyramid_levels, max(configured, needed)))
+
+    def _track(self, cv2, previous_gray, gray, previous_points, expected_px=None):
         """Forward-backward Lucas-Kanade.
 
         The backward check is what makes this usable over repetitive ground -
@@ -298,9 +373,11 @@ class FrameToFrameOdometry:
         contribute a confident wrong displacement.
         """
         criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 20, 0.03)
+        window = (self.lk_window_px, self.lk_window_px)
+        levels = self._pyramid_levels_for(expected_px)
         forward, status, _err = cv2.calcOpticalFlowPyrLK(
             previous_gray, gray, previous_points, None,
-            winSize=(21, 21), maxLevel=3, criteria=criteria,
+            winSize=window, maxLevel=levels, criteria=criteria,
         )
         if forward is None or status is None:
             return (None, None)
@@ -310,7 +387,7 @@ class FrameToFrameOdometry:
 
         backward, back_status, _err = cv2.calcOpticalFlowPyrLK(
             gray, previous_gray, forward, None,
-            winSize=(21, 21), maxLevel=3, criteria=criteria,
+            winSize=window, maxLevel=levels, criteria=criteria,
         )
         if backward is not None and back_status is not None:
             round_trip = np.linalg.norm(backward - previous_points, axis=1)
@@ -378,6 +455,7 @@ class FrameToFrameOdometry:
             residual_m=residual,
             rotation_rad=self._rotation(ground_previous[keep], ground_current[keep]),
         )
+        self._last_speed_mps = delta.speed_mps
 
         if delta.speed_mps > self.max_speed_mps:
             LOG.warning(
