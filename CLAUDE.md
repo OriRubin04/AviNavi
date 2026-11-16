@@ -28,7 +28,7 @@ struggles; above ~550 px it works. **Altitude is a correlate, not the cause.**
 
 Measured at a 256-keypoint budget with neither side at a ceiling:
 
-| configuration | rectified width | inlier rate |
+| configuration | rectified width | lock rate |
 |---|---|---|
 | 120 m, 60° HFOV | 277 px | 14.7% |
 | 120 m, 100° HFOV | 572 px | **90.7%** |
@@ -76,8 +76,10 @@ leaves only translation to track. Banked 20–29° went 0% → 21%.
   takeoff, checking the GPS driver and not the EKF source. `GPS_INPUT` passes
   it; external nav cannot.
 - **ArduPlane has no GPS failsafe.** No `FS_GPS_*`, no Copter-style
-  `FS_EKF_ACTION`. Losing visual position is silent: EKF3 coasts and says
-  nothing. **Any failsafe here has to be ours** — not yet written.
+  `FS_EKF_ACTION`. `FS_EKF_THRESH` exists but `ekf_check.cpp` acts only in
+  QuadPlane VTOL modes. Losing visual position: EKF3 coasts with no mode
+  change; its only sign is a GCS text `EKF3 IMU<n> stopped aiding`.
+  **Any failsafe here has to be ours** — not yet written.
 
 ## Output message
 

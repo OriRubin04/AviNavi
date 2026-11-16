@@ -258,16 +258,23 @@ localizer never reads GPS — the messages go to the CSV log and nowhere else.
 
 ## 6. Failsafe and timeout behaviour
 
-**ArduPlane has no failsafe for losing a position source.** There is no
-`FS_GPS_*` parameter, and `FS_EKF_ACTION` is a Copter parameter with no
-ArduPlane equivalent — there is nothing to configure here. (An earlier version
-of this section told you to set `FS_EKF_ACTION`; that was wrong. It was checked
-against source — see [choosing-the-output-message.md](choosing-the-output-message.md).)
+**ArduPlane has no failsafe for losing a position source in fixed-wing
+flight.** There is no `FS_GPS_*` parameter, and `FS_EKF_ACTION` is a Copter
+parameter with no ArduPlane equivalent. (An earlier version of this section told
+you to set `FS_EKF_ACTION`; that was wrong — see
+[choosing-the-output-message.md](choosing-the-output-message.md).)
 
-What actually happens when position stops arriving is quieter and worse: EKF3
-coasts on inertial dead reckoning (tier 3) with **no mode change and no
-warning**, and the aircraft keeps flying its mission on an estimate that drifts
-without bound. Do not rely on a HUD message to tell you this has happened.
+ArduPlane *does* define `FS_EKF_THRESH`, but read from source
+(`ArduPlane/ekf_check.cpp`, ArduPilot master): the check is disabled outside
+QuadPlane VTOL position modes, and the action is QLAND or QHOVER. In fixed-wing
+flight it changes nothing. It is irrelevant to a pure fixed wing.
+
+What actually happens when position stops arriving: EKF3 coasts on inertial
+dead reckoning (tier 3) with **no mode change**, and the aircraft keeps flying
+its mission on an estimate that drifts without bound. EKF3 does send a GCS
+warning, `EKF3 IMU<n> stopped aiding`, when it loses all aiding
+(`AP_NavEKF3_Control.cpp`) — but it is a message, not an action, and an operator
+beyond visual range may never see it.
 
 AviNavi's side of this is deliberate: when it has nothing valid it **sends
 nothing**, rather than repeating a stale pose to keep the rate up. A confidently

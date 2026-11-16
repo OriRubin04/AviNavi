@@ -143,8 +143,10 @@ What matters, roughly in order:
    altitude and not sensor resolution. Below about 300 tile pixels matching
    struggles; above about 550 it works. A 60° horizontal field at 120 m sees
    about 139 m across, which at a 0.5 m/px basemap is **277 tile pixels — too
-   few**: measured at 14.7% inliers. The same altitude with a 100° lens gives
-   572 px and 90.7%. Pick the field of view (or altitude) that puts you above
+   few**. In simulation that width locked 59.3% of cycles at the default
+   keypoint budget (against 100% at 554 px), and 14.7% with the budget starved
+   to 256; the same altitude with a 100° lens gives 572 px and 90.7% lock at
+   that same 256 budget. Pick the field of view (or altitude) that puts you above
    ~550 px — see [matching-robustness.md](matching-robustness.md) and
    [performance.md](performance.md). (An earlier version of this item called
    277 px "ample"; the measurements say otherwise.)
