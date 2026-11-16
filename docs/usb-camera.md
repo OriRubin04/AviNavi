@@ -138,11 +138,16 @@ What matters, roughly in order:
    `--list-formats-ext` before buying, not after.
 3. **Manual exposure and gain controls that actually work.** Some cheap UVC
    cameras accept the control and ignore it. Verify with `v4l2-ctl --get-ctrl`.
-4. **A lens whose field of view suits your cruise altitude.** A 60° horizontal
-   field at 120 m sees about 139 m across, which at a 0.5 m/px basemap is 277
-   tile pixels — ample. A very narrow lens sees too little ground to be
-   distinctive; a very wide one wastes resolution on the oblique edges that
-   rectification has to throw away anyway.
+4. **A lens whose field of view suits your cruise altitude.** What decides
+   matching is the rectified width, `ground footprint / tile GSD` — not
+   altitude and not sensor resolution. Below about 300 tile pixels matching
+   struggles; above about 550 it works. A 60° horizontal field at 120 m sees
+   about 139 m across, which at a 0.5 m/px basemap is **277 tile pixels — too
+   few**: measured at 14.7% inliers. The same altitude with a 100° lens gives
+   572 px and 90.7%. Pick the field of view (or altitude) that puts you above
+   ~550 px — see [matching-robustness.md](matching-robustness.md) and
+   [performance.md](performance.md). (An earlier version of this item called
+   277 px "ample"; the measurements say otherwise.)
 5. **USB 3.0** if the camera offers it, which removes the bandwidth question
    entirely. The Pi 5 has two USB 3.0 ports — use those, not the 2.0 pair.
 

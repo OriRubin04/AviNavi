@@ -258,18 +258,24 @@ localizer never reads GPS — the messages go to the CSV log and nowhere else.
 
 ## 6. Failsafe and timeout behaviour
 
-ArduPilot stops aiding when external nav data stops arriving; you will see
-`EKF3 IMU0 stopped aiding` in the HUD. Configure what the vehicle does then:
+**ArduPlane has no failsafe for losing a position source.** There is no
+`FS_GPS_*` parameter, and `FS_EKF_ACTION` is a Copter parameter with no
+ArduPlane equivalent — there is nothing to configure here. (An earlier version
+of this section told you to set `FS_EKF_ACTION`; that was wrong. It was checked
+against source — see [choosing-the-output-message.md](choosing-the-output-message.md).)
 
-- `FS_EKF_ACTION` — what happens on an EKF failsafe (land, AltHold, etc.).
-- `FS_EKF_THRESH` — the EKF variance threshold that triggers it.
-
-Do not raise `FS_EKF_THRESH` to stop the failsafe firing during bring-up. If it
-is firing, the visual solution is not good enough yet.
+What actually happens when position stops arriving is quieter and worse: EKF3
+coasts on inertial dead reckoning (tier 3) with **no mode change and no
+warning**, and the aircraft keeps flying its mission on an estimate that drifts
+without bound. Do not rely on a HUD message to tell you this has happened.
 
 AviNavi's side of this is deliberate: when it has nothing valid it **sends
-nothing**, rather than repeating a stale pose to keep the rate up. Silence is a
-signal the EKF knows how to act on; a confidently repeated wrong position is not.
+nothing**, rather than repeating a stale pose to keep the rate up. A confidently
+repeated wrong position is worse than silence. But silence is *not* a signal
+ArduPlane acts on — it simply coasts. A failsafe for "all three navigation tiers
+exhausted" therefore has to be implemented on our side, and **it is not yet
+written**. Until it is, treat any flight beyond visual range as unprotected
+against loss of visual position.
 
 ## 7. Verifying that ArduPilot is receiving the messages
 
