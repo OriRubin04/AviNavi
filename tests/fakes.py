@@ -139,6 +139,9 @@ class FakeConnection:
         self._connected = connected
         self.sent_counts = {}
         self.received_counts = {}
+        self.system_id = 1
+        self.component_id = 197
+        self.handlers = {}
 
     @property
     def connected(self) -> bool:
@@ -161,6 +164,39 @@ class FakeConnection:
 
     def note_sent(self, message_type: str) -> None:
         self.sent_counts[message_type] = self.sent_counts.get(message_type, 0) + 1
+
+    def add_handler(self, message_type: str, handler) -> None:
+        self.handlers.setdefault(message_type, []).append(handler)
+
+    def dispatch(self, message) -> None:
+        """Feed a message in as the receive thread would."""
+        for handler in self.handlers.get(message.get_type(), ()):
+            handler(message)
+
+    def send_command_ack(
+        self, command: int, result: int, target_system: int = 0,
+        target_component: int = 0,
+    ) -> None:
+        with self._lock:
+            self._loopback.mav.command_ack_send(
+                int(command), int(result), 0, 0,
+                int(target_system), int(target_component),
+            )
+        self.note_sent("COMMAND_ACK")
+
+    def send_command_long(self, command: int, **params) -> None:
+        with self._lock:
+            self._loopback.mav.command_long_send(
+                self.system_id, self.component_id, int(command), 0,
+                float(params.get("param1", 0.0)), float(params.get("param2", 0.0)),
+                float(params.get("param3", 0.0)), float(params.get("param4", 0.0)),
+                float(params.get("param5", 0.0)), float(params.get("param6", 0.0)),
+                float(params.get("param7", 0.0)),
+            )
+        self.note_sent("COMMAND_LONG")
+
+    def request_message_interval(self, message_id: int, interval_us: float) -> None:
+        self.send_command_long(511, param1=float(message_id), param2=float(interval_us))
 
     # -- test helpers -------------------------------------------------------
     @property
@@ -197,3 +233,25 @@ def similarity_homography(
     matrix[:2, :2] = scale * np.array([[cos_r, -sin_r], [sin_r, cos_r]])
     matrix[:2, 2] = translation
     return matrix
+
+
+class Clock:
+    """A monotonic clock the test drives.
+
+    Dead reckoning's limits are measured against a clock rather than against a
+    sum of optical flow's own timestamps, because a component that has failed
+    stops emitting timestamps and every limit built on them silently stops
+    applying - which is exactly how a frozen position came to be published as
+    a confident current one. Tests therefore have to advance time explicitly,
+    and this makes that possible without sleeping.
+    """
+
+    def __init__(self, t: float = 0.0) -> None:
+        self.t = float(t)
+
+    def __call__(self) -> float:
+        return self.t
+
+    def advance(self, seconds: float) -> "Clock":
+        self.t += float(seconds)
+        return self

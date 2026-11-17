@@ -100,6 +100,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     map_info = subparsers.add_parser("map-info", help="summarise a map tile database")
     map_info.add_argument("database", nargs="?", help="map database directory")
+    map_info.add_argument(
+        "--no-localizability",
+        action="store_true",
+        help="skip the per-tile localizability scoring, which reads every "
+        "tile's features and is the slow part of this command",
+    )
     map_info.set_defaults(func=command_map_info)
 
     mavlink_check = subparsers.add_parser(
@@ -220,7 +226,7 @@ def command_map_info(args, config: Config) -> int:
 
     path = args.database or config.map.database_path
     try:
-        info = summarise(path)
+        info = summarise(path, score_localizability=not args.no_localizability)
     except MapCoverageError as exc:
         LOG.error("%s", exc)
         return 2
@@ -233,6 +239,29 @@ def command_map_info(args, config: Config) -> int:
             file=sys.stderr,
         )
         return 1
+
+    # Surface the localizability verdict on stderr as well as in the JSON.
+    # Discovering mid-flight that part of the route is unmatchable ground is
+    # considerably more expensive than reading a warning here.
+    scores = info.get("localizability") or {}
+    repetitive = scores.get("repetitive_tiles") or []
+    unusable = (scores.get("verdicts") or {}).get("unusable", 0)
+    poor = (scores.get("verdicts") or {}).get("poor", 0)
+    if repetitive:
+        print(
+            "\nWARNING: %d tile(s) show repetitive structure (%s). This is the "
+            "failure mode that produces confident WRONG positions rather than no "
+            "position: a matcher can lock one row off and the EKF cannot reject "
+            "it. See docs/map-database.md." % (len(repetitive), ", ".join(repetitive[:5])),
+            file=sys.stderr,
+        )
+    if unusable or poor:
+        print(
+            "\nNOTE: %d tile(s) unusable and %d poor out of %d scored. Plan a "
+            "route that does not depend on them, and expect dropouts where it "
+            "must cross them." % (unusable, poor, scores.get("tiles_scored", 0)),
+            file=sys.stderr,
+        )
     return 0
 
 

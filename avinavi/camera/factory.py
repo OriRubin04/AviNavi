@@ -15,7 +15,17 @@ def create_camera(config, loop: bool = False) -> CameraSource:
         )
     if source == "opencv":
         return OpenCVCamera(
-            device=config.device, width=config.width, height=config.height, fps=config.fps
+            device=config.device,
+            width=config.width,
+            height=config.height,
+            fps=config.fps,
+            fourcc=config.fourcc,
+            lock_exposure=config.lock_exposure,
+            max_exposure_s=config.max_exposure_s,
+            gain=config.gain,
+            drain_to_newest=config.drain_to_newest,
+            max_frame_age_s=config.max_frame_age_s,
+            warmup_frames=config.warmup_frames,
         )
     if source == "directory":
         return DirectoryCamera(

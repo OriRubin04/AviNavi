@@ -13,13 +13,21 @@ import os
 from collections import OrderedDict
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
-from ..geo import BoundingBox, bounding_box_around
+from ..geo import BoundingBox, bounding_box_around, haversine_distance_m
 from ..types import GeoPoint
 from .tile import MapTile, TileFormatError, TileMetadata, METADATA_FILENAME
 
 LOG = logging.getLogger(__name__)
 
 INDEX_FILENAME = "index.json"
+
+
+class ExtractorMismatchError(RuntimeError):
+    """The tiles' features cannot be compared against the configured extractor.
+
+    Raised on the ground, at startup, in place of a flight that would have
+    streamed happily and never produced a single match.
+    """
 
 
 class MapCoverageError(RuntimeError):
@@ -77,11 +85,13 @@ class MapDatabase:
         index_path = os.path.join(self.path, INDEX_FILENAME)
         if not os.path.exists(index_path):
             return None
+        if self._index_is_stale(index_path):
+            return None
         try:
             with open(index_path, "r", encoding="utf-8") as handle:
                 payload = json.load(handle)
             entries = payload["tiles"] if isinstance(payload, dict) else payload
-            return [
+            metadatas = [
                 TileMetadata.from_dict(
                     entry, os.path.join(self.path, entry["directory"])
                 )
@@ -90,6 +100,86 @@ class MapDatabase:
         except (OSError, ValueError, KeyError) as exc:
             LOG.warning("ignoring unreadable %s (%s); rescanning", index_path, exc)
             return None
+
+        # The mtime check above catches a rebuilt database. This catches one
+        # whose tile *set* changed - tiles added, removed, or renamed - which
+        # can happen with timestamps that look perfectly fresh, for instance
+        # after copying a database between machines.
+        on_disk = {
+            entry
+            for entry in os.listdir(self.path)
+            if os.path.exists(os.path.join(self.path, entry, METADATA_FILENAME))
+        }
+        indexed = {
+            os.path.basename(m.directory.rstrip("/\\")) for m in metadatas
+        }
+        if on_disk != indexed:
+            LOG.warning(
+                "%s lists %d tiles but %d are on disk (%d only in the index, "
+                "%d only on disk); ignoring the index and rescanning",
+                index_path,
+                len(indexed),
+                len(on_disk),
+                len(indexed - on_disk),
+                len(on_disk - indexed),
+            )
+            return None
+        return metadatas
+
+    def _index_is_stale(self, index_path: str) -> bool:
+        """Is ``index.json`` older than the tiles it claims to describe?
+
+        This check exists because of a bug that cost a whole measurement run and
+        would have been far worse in the air.  The index is a cache of the
+        per-tile ``metadata.json`` files, written to spare a directory scan at
+        startup.  Rebuilding a database over an existing directory rewrites
+        every tile's own metadata but leaves the index describing the *previous*
+        build, and because the index was trusted unconditionally, the whole
+        system then used the old georeferencing: a measurement with correct
+        imagery, correct features, correct matching, and a constant 100 m
+        position offset that nothing reported.
+
+        In flight that is the worst possible failure shape - a confident,
+        plausible, consistently wrong position, which is exactly what the EKF
+        has no way to reject.  So the index is now treated as what it is, a
+        cache, and revalidated on every load.  One ``stat`` per tile is nothing
+        against startup I/O, and if the check is wrong it is wrong in the safe
+        direction: a needless rescan.
+        """
+        try:
+            index_mtime = os.path.getmtime(index_path)
+        except OSError:
+            return True
+
+        newest_tile_mtime = 0.0
+        newest_tile = None
+        try:
+            entries = sorted(os.listdir(self.path))
+        except OSError:
+            return True
+        for entry in entries:
+            metadata_path = os.path.join(self.path, entry, METADATA_FILENAME)
+            try:
+                mtime = os.path.getmtime(metadata_path)
+            except OSError:
+                continue
+            if mtime > newest_tile_mtime:
+                newest_tile_mtime = mtime
+                newest_tile = entry
+
+        # A one-second grace: the builder writes the tiles and then the index,
+        # so on a coarse-grained filesystem they can share a timestamp.
+        if newest_tile_mtime > index_mtime + 1.0:
+            LOG.warning(
+                "%s is older than the tiles it describes (%s is newer); it is a "
+                "stale cache from an earlier build and is being ignored. "
+                "Rescanning the tiles themselves - run 'avinavi map-info' to "
+                "rewrite the index.",
+                index_path,
+                newest_tile,
+            )
+            return True
+        return False
 
     def _scan(self) -> List[TileMetadata]:
         found: List[TileMetadata] = []
@@ -143,6 +233,70 @@ class MapDatabase:
         north = max(t.bounds.north for t in self._tiles.values())
         return BoundingBox(west, south, east, north)
 
+    # -- what built these features -----------------------------------------
+    @property
+    def extractor_fingerprint(self):
+        """The extractor this database's features were built with, if recorded.
+
+        ``None`` for a database written before fingerprinting existed.  Where
+        tiles disagree the weakest is returned, and :meth:`verify_extractor`
+        reports the disagreement itself.
+        """
+        from ..features.fingerprint import consensus  # noqa: PLC0415
+
+        fingerprint, _ = consensus(
+            [tile.metadata.extractor_fingerprint for tile in self._tiles.values()]
+        )
+        return fingerprint
+
+    def verify_extractor(self, current, strict: bool = True):
+        """Check this database's features against the extractor about to run.
+
+        Tile descriptors are written offline and compared against live frames in
+        the air, with nothing but configuration connecting the two.  When that
+        configuration drifts the failure is silent - the system boots, the camera
+        streams, and there are simply no matches - so the check happens here,
+        once, on the ground.
+
+        Raises :class:`ExtractorMismatchError` when the descriptors cannot be
+        compared at all and ``strict``.  A difference that merely costs match
+        quality is logged and returned, never fatal: the offline path
+        *intentionally* uses a larger keypoint budget and full tile resolution,
+        and grounding a correct setup would be worse than the problem.
+
+        Returns the :class:`~avinavi.features.fingerprint.FingerprintComparison`
+        so a caller can report it however it likes.
+        """
+        from ..features.fingerprint import compare_database, consensus  # noqa: PLC0415
+
+        fingerprints = [
+            tile.metadata.extractor_fingerprint for tile in self._tiles.values()
+        ]
+        comparison = compare_database(fingerprints, current)
+        stored, _ = consensus(fingerprints)
+
+        for note in comparison.degraded:
+            LOG.warning("map database %s: %s", self.path, note)
+
+        if comparison.incompatible:
+            detail = "; ".join(comparison.incompatible)
+            message = (
+                "the map database at %s cannot be matched against this "
+                "configuration: %s. Either fix the configuration or rebuild the "
+                "tiles with 'avinavi extract-features --force'."
+                % (self.path, detail)
+            )
+            if strict:
+                raise ExtractorMismatchError(message)
+            LOG.error("%s", message)
+        elif stored is not None and comparison.clean:
+            LOG.info(
+                "map database %s was built with %s, which matches this configuration",
+                self.path,
+                stored.describe(),
+            )
+        return comparison
+
     # -- the moving search window ------------------------------------------
     def candidates(
         self,
@@ -153,9 +307,26 @@ class MapDatabase:
     ) -> List[MapTile]:
         """Tiles whose footprint comes within ``radius_m`` of ``center``.
 
-        Results are ordered nearest-first by the distance from ``center`` to the
-        tile footprint (0 when ``center`` is inside the tile), which puts the
-        most likely match first so ``limit`` truncates the least useful tiles.
+        Ordered most-likely-first, so ``limit`` truncates the least useful
+        tiles.  The ordering is by distance to the tile **footprint** and then,
+        as the tie-break, by distance to the tile **centre**.
+
+        That second key is not a refinement; it does the real work.  Tiles
+        overlap - 30% by default - so the aircraft is normally inside *several*
+        at once, and every one of those has a footprint distance of exactly
+        zero.  Ordering on the footprint alone therefore leaves the containing
+        tiles in arbitrary order (it was ``tile_id``, i.e. alphabetical), and a
+        measured sweep showed the consequence: cutting
+        ``lightglue.max_candidate_tiles`` from 4 to 2 halved the lock rate while
+        2 to 1 cost nothing, which is the signature of the right tile landing
+        third or fourth as often as first.
+
+        Distance to the centre is the right discriminator because a frame near a
+        tile's centre has its **whole camera footprint** inside that tile, while
+        the same frame near a tile's edge is half outside it and can only match
+        on the half that overlaps.  Preferring the tile the aircraft is most
+        deeply inside maximises the inliers available.
+
         ``prefer`` promotes named tiles - normally the tile that produced the
         previous fix - to the front, since spatial continuity makes it by far
         the most likely match for the next frame.
@@ -164,16 +335,19 @@ class MapDatabase:
             raise ValueError("search radius must be positive")
 
         box = bounding_box_around(center, radius_m)
-        scored: List[Tuple[float, MapTile]] = []
+        scored: List[Tuple[float, float, str, MapTile]] = []
         for tile in self._tiles.values():
             if not _boxes_intersect(tile.bounds, box):
                 continue
             distance = tile.bounds.distance_to_m(center)
             if distance <= radius_m:
-                scored.append((distance, tile))
+                centre_distance = haversine_distance_m(center, tile.bounds.center)
+                # tile_id stays as the final key so the order is deterministic
+                # when two tiles are genuinely equidistant.
+                scored.append((distance, centre_distance, tile.tile_id, tile))
 
-        scored.sort(key=lambda item: (item[0], item[1].tile_id))
-        ordered = [tile for _, tile in scored]
+        scored.sort(key=lambda item: (item[0], item[1], item[2]))
+        ordered = [item[3] for item in scored]
 
         if prefer:
             preferred_ids = [tid for tid in prefer if tid in self._tiles]
