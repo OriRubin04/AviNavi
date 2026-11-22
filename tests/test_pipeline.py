@@ -496,3 +496,27 @@ def test_a_fix_becomes_a_correctly_framed_odometry_message(
     )
     assert 0.0 < position_error < 40.0
     assert 1 <= message.quality <= 100
+
+
+def test_tracking_matches_fewer_tiles_and_a_miss_restores_the_full_search(
+    tmp_path, tile, origin, extrinsics
+):
+    """While locked only tracking_candidate_tiles are matched; after a miss, all."""
+    frame_points, tile_points = synthesise_view(tile, origin, 0.0, 0.0, 110.0, 0.0, extrinsics)
+    engine = build_engine(tmp_path, tile, frame_points, tile_points)
+    engine.initialize(origin)
+    engine.config.lightglue.max_candidate_tiles = 6
+    engine.config.lightglue.tracking_candidate_tiles = 2
+    limits = []
+    engine.database.candidates = lambda **kw: limits.append(kw["limit"]) or []
+
+    engine._candidate_tiles()                      # never locked yet
+    engine._last_tile_id, engine._consecutive_failures = "tile_center", 0
+    engine._candidate_tiles()                      # tracking
+    engine._consecutive_failures = 1
+    engine._candidate_tiles()                      # just missed
+    engine.config.lightglue.tracking_candidate_tiles = 0
+    engine._consecutive_failures = 0
+    engine._candidate_tiles()                      # feature disabled
+
+    assert limits == [6, 2, 6, 6]

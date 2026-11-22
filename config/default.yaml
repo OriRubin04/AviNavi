@@ -108,8 +108,8 @@ camera_extrinsics:
 # ---------------------------------------------------------------------------
 rates:
   camera_fps: 30.0
-  # 2 Hz is what a Pi 5 sustains with SuperPoint+LightGlue on CPU at
-  # resize_max_side 640. Benchmark with `avinavi bench` before raising it; a
+  # NOT measured on a Pi 5. A 2-core i3 laptop takes ~3.6 s/frame (UAV-VisLoc),
+  # so 2 Hz is likely out of reach on CPU. Benchmark with `avinavi bench`; a
   # requested rate the Pi cannot meet silently becomes a lower actual rate.
   visual_localization_hz: 2.0
   # Frame-to-frame odometry. NOT tied to visual_localization_hz, and not a
@@ -179,7 +179,11 @@ superpoint:
   detection_threshold: 0.0005
   nms_radius: 4
   device: auto                   # auto | cpu | cuda
-  resize_max_side: 640
+  # Match prewarp.max_output_side: do not shrink the rectified frame again.
+  # Measured on UAV-VisLoc (120 frames): 768 locks 83% at 5.7 s/frame on a
+  # 2-core i3; 640 locks 57% and is SLOWER (7.3 s) because harder matches
+  # defeat LightGlue's early exit; 480 locks 3%.
+  resize_max_side: 768
   min_keypoints: 64
 
 # ---------------------------------------------------------------------------
@@ -191,7 +195,12 @@ lightglue:
   width_confidence: 0.99         # point pruning; -1 disables
   filter_threshold: 0.1
   device: auto
-  max_candidate_tiles: 6
+  max_candidate_tiles: 6         # while searching (after a miss)
+  # While tracking (the previous frame locked) only this many tiles are matched.
+  # LightGlue runs once per tile, so this is the main cost lever. Measured on
+  # UAV-VisLoc with the search aimed: 2 tiles lock 82.5% vs 83.3% for 6, at
+  # 3.6 vs 5.7 s/frame. 0 disables (always max_candidate_tiles).
+  tracking_candidate_tiles: 2
 
 # ---------------------------------------------------------------------------
 # Geometric verification (RANSAC / MAGSAC++)

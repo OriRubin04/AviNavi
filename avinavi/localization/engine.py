@@ -590,11 +590,18 @@ class LocalizationEngine:
             if self._last_tile_id and self.config.tile_search.prefer_last_matched_tile
             else None
         )
+        # Tracking (the previous cycle locked) needs few tiles: the right one is
+        # normally first. After any miss, search the full set again so that
+        # re-acquisition is not capped by the tracking budget.
+        limit = self.config.lightglue.max_candidate_tiles
+        tracking = self.config.lightglue.tracking_candidate_tiles
+        if tracking and self._consecutive_failures == 0 and self._last_tile_id:
+            limit = min(limit, tracking)
         try:
             return self.database.candidates(
                 center=self._search_center,
                 radius_m=self._search_radius_m,
-                limit=self.config.lightglue.max_candidate_tiles,
+                limit=limit,
                 prefer=prefer,
             )
         except MapCoverageError:

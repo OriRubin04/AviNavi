@@ -408,8 +408,9 @@ class SuperPointConfig:
     nms_radius: int = 4
     #: "cpu" | "cuda" | "auto"
     device: str = "auto"
-    #: Longest image side fed to the network; smaller is faster on a Pi.
-    resize_max_side: int = 640
+    #: Longest image side fed to the network. Keep it at prewarp's
+    #: max_output_side: smaller was measured to lose locks AND run slower.
+    resize_max_side: int = 768
     #: Minimum keypoints in a live frame before we bother matching.
     min_keypoints: int = 64
 
@@ -424,6 +425,8 @@ class LightGlueConfig:
     device: str = "auto"
     #: Evaluate at most this many candidate tiles per localization cycle.
     max_candidate_tiles: int = 6
+    #: While tracking (previous frame locked) match only this many; 0 = off.
+    tracking_candidate_tiles: int = 2
 
 
 @dataclass

@@ -153,7 +153,12 @@ class SuperPointExtractor:
 
         tensor = torch.from_numpy(scaled).to(self.device)[None, None]
         with torch.inference_mode():
-            output = model.extract(tensor)
+            # resize=None is required: lightglue's SuperPoint.extract otherwise
+            # rescales every input to a 1024 px long side by default. That
+            # silently undid resize_max_side (a 640 px frame was upsampled back
+            # to 1024, ~2.5x the compute) and shrank larger tiles, so the
+            # fingerprint recorded a size the network never saw.
+            output = model.extract(tensor, resize=None)
 
         keypoints = output["keypoints"][0].detach().cpu().numpy().astype(np.float32)
         descriptors = output["descriptors"][0].detach().cpu().numpy().astype(np.float32)
