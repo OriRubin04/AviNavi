@@ -282,6 +282,11 @@ def main(argv=None):
     ap.add_argument("--hfov", type=float, default=None, help="skip calibration: use this HFOV")
     ap.add_argument("--yaw-sign", type=int, default=1)
     ap.add_argument("--yaw-offset", type=float, default=0.0)
+    ap.add_argument("--omega-sign", type=float, default=-1.0,
+                    help="engine pitch = sign * Omega (measured: -1)")
+    ap.add_argument("--mount-deg", type=float, default=2.0,
+                    help="fixed camera tilt added to Kappa (measured: ~2 deg)")
+    ap.add_argument("--tag", default="", help="suffix for the result file names")
     args = ap.parse_args(argv)
 
     import cv2
@@ -292,6 +297,12 @@ def main(argv=None):
     out.mkdir(parents=True, exist_ok=True)
     flight_dir, csv_path, tif = find_flight(data)
     frames = read_frames(csv_path, flight_dir / "drone")
+    # Measured on this dataset (docs/visloc-benchmark-plan.md): with yaw = Phi1+90
+    # the engine's pitch acts cross-track, Omega's sign is inverted, and the
+    # camera has a fixed ~2 deg tilt on the along-track (Kappa) axis.
+    for f in frames:
+        f["pitch_deg"] = args.omega_sign * f["pitch_deg"]
+        f["roll_deg"] = f["roll_deg"] + args.mount_deg
     log("flight %s: %d frames, map %s" % (flight_dir.name, len(frames), tif.name))
 
     config = load_config()
@@ -330,14 +341,19 @@ def main(argv=None):
         t0 = time.monotonic()
         fix = localize(engine, image, frame, mode)
         dt = time.monotonic() - t0
-        err = None
+        err = dn = de = None
         if fix.valid and fix.geo is not None:
             err = haversine_m(fix.geo.lat_deg, fix.geo.lon_deg, frame["lat"], frame["lon"])
+            dn = math.radians(fix.geo.lat_deg - frame["lat"]) * 6371008.8
+            de = (math.radians(fix.geo.lon_deg - frame["lon"]) * 6371008.8
+                  * math.cos(math.radians(frame["lat"])))
         quality = getattr(fix, "quality", None)
         per_frame.append({
             "num": frame["num"], "valid": bool(fix.valid),
             "reason": getattr(fix.reason, "name", str(fix.reason)),
             "error_m": None if err is None else round(err, 2),
+            "err_north_m": None if dn is None else round(dn, 2),
+            "err_east_m": None if de is None else round(de, 2),
             "sigma_m": None if not math.isfinite(fix.position_sigma_m) else round(fix.position_sigma_m, 2),
             "inliers": getattr(quality, "inliers", getattr(quality, "inlier_count", None)),
             "tile": fix.tile_id, "ms": round(dt * 1000),
@@ -365,6 +381,7 @@ def main(argv=None):
         "frames_scored": len(per_frame),
         "calibration_frames_excluded": len(calib_idx),
         "hfov_deg": hfov, "yaw_sign": mode[0], "yaw_offset_deg": mode[1],
+        "omega_sign": args.omega_sign, "mount_deg": args.mount_deg,
         "tile_gsd_mpp": TILE_GSD_MPP, "frame_width_px": FRAME_WIDTH_PX,
         "lock_rate": round(len(errs) / max(1, len(per_frame)), 4),
         "good_fix_rate": round(len(good) / max(1, len(per_frame)), 4),
@@ -377,18 +394,18 @@ def main(argv=None):
         "superpoint_keypoints": config.superpoint.max_num_keypoints,
         "max_candidate_tiles": config.lightglue.max_candidate_tiles,
         "calibration_trials": trials,
-        "note": "ground truth is the dataset lat/lon; with up to 5 deg of tilt at "
-                "466 m, image centre and aircraft position differ by up to ~40 m",
+        "note": "ground truth is the dataset lat/lon, which behaves as the aircraft "
+                "position; omega_sign and mount_deg were measured on this flight",
     }
-    (out / "visloc_results.json").write_text(json.dumps(results, indent=2))
-    with open(out / "visloc_frames.csv", "w", newline="") as f:
+    (out / ("visloc_results%s.json" % args.tag)).write_text(json.dumps(results, indent=2))
+    with open(out / ("visloc_frames%s.csv" % args.tag), "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(per_frame[0].keys()))
         w.writeheader()
         w.writerows(per_frame)
     log("DONE. lock %.1f%%, good %.1f%%, false %d, error p50 %s m"
         % (100 * results["lock_rate"], 100 * results["good_fix_rate"],
            results["false_fixes_over_%dm" % FALSE_FIX_M], results["error_m_p50_good"]))
-    log("send this file: %s" % (out / "visloc_results.json"))
+    log("send this file: %s" % (out / ("visloc_results%s.json" % args.tag)))
 
 
 if __name__ == "__main__":
