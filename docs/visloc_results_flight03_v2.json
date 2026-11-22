@@ -1,0 +1,30 @@
+{
+  "dataset": "UAV-VisLoc example, flight 03",
+  "frames_scored": 768,
+  "calibration_frames_excluded": 0,
+  "hfov_deg": 60.0,
+  "yaw_sign": 1,
+  "yaw_offset_deg": 90.0,
+  "omega_sign": -1.0,
+  "mount_deg": 2.0,
+  "tile_gsd_mpp": 0.5,
+  "frame_width_px": 1280,
+  "lock_rate": 0.8763,
+  "good_fix_rate": 0.8763,
+  "false_fixes_over_60m": 0,
+  "error_m_p50_good": 6.6,
+  "error_m_p90_good": 13.03,
+  "error_m_max": 21.42,
+  "failure_reasons": {
+    "LOW_CONFIDENCE": 78,
+    "GEOMETRIC_VERIFICATION_FAILED": 11,
+    "FRAME_TOO_BLURRED": 6
+  },
+  "ms_per_frame_median": 7234.0,
+  "torch": "2.15.0+cpu",
+  "threads": 2,
+  "superpoint_keypoints": 1024,
+  "max_candidate_tiles": 6,
+  "calibration_trials": [],
+  "note": "ground truth is the dataset lat/lon, which behaves as the aircraft position; omega_sign and mount_deg were measured on this flight"
+}

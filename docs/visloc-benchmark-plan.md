@@ -74,4 +74,10 @@ image-centre ground point, each frame seeded at truth) and
    (6.1 m on flight 03) and its claim that the labels are swapped.
    **Lesson for real flight:** 2 deg of uncalibrated mount tilt costs 16 m at
    466 m. Camera extrinsics must be calibrated, not assumed.
-4. Not yet done: re-run the whole sequential flight with these settings.
+4. Full sequential flight with these settings (all 768 frames, seeded once,
+   HFOV 60, yaw = Phi1 + 90, omega_sign -1, mount 2 deg), measured:
+   lock 87.6%, **0 fixes over 60 m**, error p50 **6.6 m**, p90 13.0 m,
+   max 21.4 m, 7.2 s/frame on CPU. Mean bias N -3.3 m, E +0.4 m.
+   Failures: LOW_CONFIDENCE 78, GEOMETRIC_VERIFICATION_FAILED 11, BLURRED 6.
+   Caveat: the 2 deg mount was measured on this same flight.
+   Full numbers: `visloc_results_flight03_v2.json`.

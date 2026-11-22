@@ -132,6 +132,14 @@ python3 -m pytest -q          # 612 passed, 2 skipped
 Tools: `tools/run_scale_experiment.py` (geometry and horizon guards, `--only` is
 a repeatable flag), `tools/measure_flow_drift.py`.
 
+## Real imagery (UAV-VisLoc flight 03, 466 m, CPU)
+
+Tier 1 on real drone photos vs a satellite map from another year: lock 87.6%,
+0 false fixes, median 6.6 m, p90 13 m (`tools/run_visloc.bat`). The first run's
+20 m median was dataset attitude conventions plus a 2° camera mount tilt, not
+matching error. 2° of uncalibrated mount tilt costs 16 m at this height. See
+`docs/visloc-benchmark-plan.md`.
+
 ## Open, in rough priority order
 
 1. **Never run on a Pi 5.** No idea whether tier 1 holds the real-time budget.
