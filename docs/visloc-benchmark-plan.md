@@ -37,3 +37,41 @@ determined: error is flat over 35-95 deg; dataset GSD implies ~46-81 deg),
 yaw = Phi1 + 90 deg. Error correlates with tilt (r = 0.48: median 18 m at
 <10 m tilt offset, 32 m at 20-40 m), so part of it is image-centre vs aircraft
 position; ~18 m remains unexplained. Full numbers: `visloc_results_flight03.json`.
+
+## Where the ~20 m came from (2026-11-22, measured)
+Tools: `tools/visloc_error_vectors.py` (signed N/E error per frame, body fix and
+image-centre ground point, each frame seeded at truth) and
+`tools/visloc_attitude_test.py` (re-runs the full pipeline under attitude variants).
+
+1. Error vectors, every 4th frame (166/192 locked, HFOV 60 and 95 alike):
+   - No constant north/east bias (mean N -2.5, E +2.0 m), so **not a map offset**.
+   - Constant **+16.7 m along-track** (ahead), ~0 cross-track.
+   - Image-centre error follows the attitude labels at ~8 m/deg = 466 m x tan(1 deg):
+     along-track with Kappa (r = +0.81), cross-track with Omega (r = -0.87).
+     So the CSV lat/lon is the aircraft position, not the image centre as the
+     README says, and Kappa behaves as pitch, Omega as roll.
+   - Our yaw = Phi1 + 90 deg with identity extrinsics put engine-pitch
+     cross-track and engine-roll along-track, so the axes were already matched;
+     but the cross-track sign was wrong (body-fix cross error -14.5 m/deg,
+     double the -7.9 of the raw image centre).
+   - HFOV does not matter here (18.1 vs 18.3 m).
+2. Prediction: flip Omega's sign and add a ~2.1 deg (16.7 m / 8.1 m/deg) fixed
+   camera tilt on the along-track axis. Tested in the full pipeline on a
+   disjoint sample (every 12th frame, 64 frames, HFOV 60):
+
+   | variant | locked | median error |
+   |---|---|---|
+   | as run | 58/64 | 22.5 m |
+   | pitch = -Omega | 58/64 | 16.7 m |
+   | pitch = -Omega, roll = Kappa + 2 deg | 59/64 | **5.8 m** |
+   | ... + 1 deg | 59/64 | 10.5 m |
+   | ... - 2 deg | 57/64 | 29.9 m |
+
+   A first test that also swapped Omega/Kappa failed (best 16.9 m), because the
+   90 deg yaw offset had already swapped them; that test was mis-designed.
+3. Conclusion: the ~20 m was a dataset-convention mismatch plus a ~2 deg camera
+   mount tilt, not matching error. Matches the third-party GeoAnchor report
+   (6.1 m on flight 03) and its claim that the labels are swapped.
+   **Lesson for real flight:** 2 deg of uncalibrated mount tilt costs 16 m at
+   466 m. Camera extrinsics must be calibrated, not assumed.
+4. Not yet done: re-run the whole sequential flight with these settings.
