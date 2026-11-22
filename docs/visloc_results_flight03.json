@@ -1,0 +1,325 @@
+{
+  "dataset": "UAV-VisLoc example, flight 03",
+  "frames_scored": 760,
+  "calibration_frames_excluded": 8,
+  "hfov_deg": 95.0,
+  "yaw_sign": 1,
+  "yaw_offset_deg": 90,
+  "tile_gsd_mpp": 0.5,
+  "frame_width_px": 1280,
+  "lock_rate": 0.8618,
+  "good_fix_rate": 0.8592,
+  "false_fixes_over_60m": 2,
+  "error_m_p50_good": 20.08,
+  "error_m_p90_good": 32.04,
+  "error_m_max": 64.73,
+  "failure_reasons": {
+    "LOW_CONFIDENCE": 82,
+    "GEOMETRIC_VERIFICATION_FAILED": 17,
+    "FRAME_TOO_BLURRED": 6
+  },
+  "ms_per_frame_median": 7172.0,
+  "torch": "2.15.0+cpu",
+  "threads": 2,
+  "superpoint_keypoints": 1024,
+  "max_candidate_tiles": 6,
+  "calibration_trials": [
+    {
+      "stage": 1,
+      "hfov": 45.0,
+      "yaw_sign": 1,
+      "yaw_offset": 0,
+      "locks": 0,
+      "median_err_m": Infinity
+    },
+    {
+      "stage": 1,
+      "hfov": 45.0,
+      "yaw_sign": 1,
+      "yaw_offset": 90,
+      "locks": 4,
+      "median_err_m": 23.88949701771451
+    },
+    {
+      "stage": 1,
+      "hfov": 45.0,
+      "yaw_sign": 1,
+      "yaw_offset": 180,
+      "locks": 0,
+      "median_err_m": Infinity
+    },
+    {
+      "stage": 1,
+      "hfov": 45.0,
+      "yaw_sign": 1,
+      "yaw_offset": 270,
+      "locks": 0,
+      "median_err_m": Infinity
+    },
+    {
+      "stage": 1,
+      "hfov": 45.0,
+      "yaw_sign": -1,
+      "yaw_offset": 0,
+      "locks": 4,
+      "median_err_m": 24.040347719757087
+    },
+    {
+      "stage": 1,
+      "hfov": 45.0,
+      "yaw_sign": -1,
+      "yaw_offset": 90,
+      "locks": 0,
+      "median_err_m": Infinity
+    },
+    {
+      "stage": 1,
+      "hfov": 45.0,
+      "yaw_sign": -1,
+      "yaw_offset": 180,
+      "locks": 0,
+      "median_err_m": Infinity
+    },
+    {
+      "stage": 1,
+      "hfov": 45.0,
+      "yaw_sign": -1,
+      "yaw_offset": 270,
+      "locks": 0,
+      "median_err_m": Infinity
+    },
+    {
+      "stage": 1,
+      "hfov": 65.0,
+      "yaw_sign": 1,
+      "yaw_offset": 0,
+      "locks": 0,
+      "median_err_m": Infinity
+    },
+    {
+      "stage": 1,
+      "hfov": 65.0,
+      "yaw_sign": 1,
+      "yaw_offset": 90,
+      "locks": 3,
+      "median_err_m": 13.170212390761328
+    },
+    {
+      "stage": 1,
+      "hfov": 65.0,
+      "yaw_sign": 1,
+      "yaw_offset": 180,
+      "locks": 0,
+      "median_err_m": Infinity
+    },
+    {
+      "stage": 1,
+      "hfov": 65.0,
+      "yaw_sign": 1,
+      "yaw_offset": 270,
+      "locks": 0,
+      "median_err_m": Infinity
+    },
+    {
+      "stage": 1,
+      "hfov": 65.0,
+      "yaw_sign": -1,
+      "yaw_offset": 0,
+      "locks": 3,
+      "median_err_m": 12.886854013454494
+    },
+    {
+      "stage": 1,
+      "hfov": 65.0,
+      "yaw_sign": -1,
+      "yaw_offset": 90,
+      "locks": 0,
+      "median_err_m": Infinity
+    },
+    {
+      "stage": 1,
+      "hfov": 65.0,
+      "yaw_sign": -1,
+      "yaw_offset": 180,
+      "locks": 0,
+      "median_err_m": Infinity
+    },
+    {
+      "stage": 1,
+      "hfov": 65.0,
+      "yaw_sign": -1,
+      "yaw_offset": 270,
+      "locks": 0,
+      "median_err_m": Infinity
+    },
+    {
+      "stage": 1,
+      "hfov": 85.0,
+      "yaw_sign": 1,
+      "yaw_offset": 0,
+      "locks": 0,
+      "median_err_m": Infinity
+    },
+    {
+      "stage": 1,
+      "hfov": 85.0,
+      "yaw_sign": 1,
+      "yaw_offset": 90,
+      "locks": 4,
+      "median_err_m": 17.326371252096884
+    },
+    {
+      "stage": 1,
+      "hfov": 85.0,
+      "yaw_sign": 1,
+      "yaw_offset": 180,
+      "locks": 0,
+      "median_err_m": Infinity
+    },
+    {
+      "stage": 1,
+      "hfov": 85.0,
+      "yaw_sign": 1,
+      "yaw_offset": 270,
+      "locks": 0,
+      "median_err_m": Infinity
+    },
+    {
+      "stage": 1,
+      "hfov": 85.0,
+      "yaw_sign": -1,
+      "yaw_offset": 0,
+      "locks": 3,
+      "median_err_m": 11.319251658932236
+    },
+    {
+      "stage": 1,
+      "hfov": 85.0,
+      "yaw_sign": -1,
+      "yaw_offset": 90,
+      "locks": 0,
+      "median_err_m": Infinity
+    },
+    {
+      "stage": 1,
+      "hfov": 85.0,
+      "yaw_sign": -1,
+      "yaw_offset": 180,
+      "locks": 0,
+      "median_err_m": Infinity
+    },
+    {
+      "stage": 1,
+      "hfov": 85.0,
+      "yaw_sign": -1,
+      "yaw_offset": 270,
+      "locks": 0,
+      "median_err_m": Infinity
+    },
+    {
+      "stage": 2,
+      "hfov": 35,
+      "yaw_sign": 1,
+      "yaw_offset": 90,
+      "locks": 6,
+      "median_err_m": 21.37466739074154
+    },
+    {
+      "stage": 2,
+      "hfov": 40,
+      "yaw_sign": 1,
+      "yaw_offset": 90,
+      "locks": 7,
+      "median_err_m": 19.638264009841606
+    },
+    {
+      "stage": 2,
+      "hfov": 45,
+      "yaw_sign": 1,
+      "yaw_offset": 90,
+      "locks": 7,
+      "median_err_m": 20.57256595014533
+    },
+    {
+      "stage": 2,
+      "hfov": 50,
+      "yaw_sign": 1,
+      "yaw_offset": 90,
+      "locks": 7,
+      "median_err_m": 19.425897579681653
+    },
+    {
+      "stage": 2,
+      "hfov": 55,
+      "yaw_sign": 1,
+      "yaw_offset": 90,
+      "locks": 7,
+      "median_err_m": 18.258811913605747
+    },
+    {
+      "stage": 2,
+      "hfov": 60,
+      "yaw_sign": 1,
+      "yaw_offset": 90,
+      "locks": 6,
+      "median_err_m": 18.09083787762817
+    },
+    {
+      "stage": 2,
+      "hfov": 65,
+      "yaw_sign": 1,
+      "yaw_offset": 90,
+      "locks": 6,
+      "median_err_m": 17.946539900432448
+    },
+    {
+      "stage": 2,
+      "hfov": 70,
+      "yaw_sign": 1,
+      "yaw_offset": 90,
+      "locks": 6,
+      "median_err_m": 17.430237259387415
+    },
+    {
+      "stage": 2,
+      "hfov": 75,
+      "yaw_sign": 1,
+      "yaw_offset": 90,
+      "locks": 7,
+      "median_err_m": 20.099130506016454
+    },
+    {
+      "stage": 2,
+      "hfov": 80,
+      "yaw_sign": 1,
+      "yaw_offset": 90,
+      "locks": 7,
+      "median_err_m": 19.627334671754884
+    },
+    {
+      "stage": 2,
+      "hfov": 85,
+      "yaw_sign": 1,
+      "yaw_offset": 90,
+      "locks": 7,
+      "median_err_m": 19.580055989759302
+    },
+    {
+      "stage": 2,
+      "hfov": 90,
+      "yaw_sign": 1,
+      "yaw_offset": 90,
+      "locks": 6,
+      "median_err_m": 16.425874833642773
+    },
+    {
+      "stage": 2,
+      "hfov": 95,
+      "yaw_sign": 1,
+      "yaw_offset": 90,
+      "locks": 7,
+      "median_err_m": 17.79452540523724
+    }
+  ],
+  "note": "ground truth is the dataset lat/lon; with up to 5 deg of tilt at 466 m, image centre and aircraft position differ by up to ~40 m"
+}
