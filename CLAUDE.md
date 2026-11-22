@@ -104,6 +104,11 @@ Instances found so far, all real:
   Fixed with an absolute tolerance in `_residual_tolerance_m`.
 - `reset()` on a missing height destroyed two frames. The frame is now cached
   before all checks.
+- `superpoint.resize_max_side` never applied: lightglue's `SuperPoint.extract`
+  resizes to 1024 px by default, so 640 px frames were upsampled back. Fixed
+  with `resize=None`. **Every simulation lock rate in this file was measured
+  with that hidden upsampling and should be re-measured.** Measured on real
+  imagery: a true 640 loses locks and is slower; 768 (= prewarp output) is right.
 
 ## Simulator artifacts — do not trust blindly
 
@@ -134,8 +139,9 @@ a repeatable flag), `tools/measure_flow_drift.py`.
 
 ## Real imagery (UAV-VisLoc flight 03, 466 m, CPU)
 
-Tier 1 on real drone photos vs a satellite map from another year: lock 87.6%,
-0 false fixes, median 6.6 m, p90 13 m (`tools/run_visloc.bat`). The first run's
+Tier 1 on real drone photos vs a satellite map from another year: lock 86.9%,
+0 false fixes, median 6.4 m, p90 13 m, 3.3 s/frame on a 2-core i3
+(`tools/run_visloc.bat`). The first run's
 20 m median was dataset attitude conventions plus a 2° camera mount tilt, not
 matching error. 2° of uncalibrated mount tilt costs 16 m at this height. See
 `docs/visloc-benchmark-plan.md`.

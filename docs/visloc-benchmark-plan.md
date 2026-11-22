@@ -81,3 +81,17 @@ image-centre ground point, each frame seeded at truth) and
    Failures: LOW_CONFIDENCE 78, GEOMETRIC_VERIFICATION_FAILED 11, BLURRED 6.
    Caveat: the 2 deg mount was measured on this same flight.
    Full numbers: `visloc_results_flight03_v2.json`.
+
+## Speed (2026-11-23, measured, 2-core i3-10110U, on AC)
+`tools/visloc_timing.py`: per-stage time and lock rate under speed settings.
+- Found: lightglue's `SuperPoint.extract` resized every input to 1024 px unless
+  given `resize=None`, so `resize_max_side` never applied. Fixed (commit 7bd3209).
+- With the fix (120 frames, search aimed at truth per frame): 768 px (no second
+  downscale) locks 83% at 5.7 s; a true 640 locks 57% at 7.3 s; 480 locks 3%.
+  Fewer keypoints lose locks (512: 41%, 256: 21% at 640). 2 tiles lock 82.5%
+  vs 83.3% for 6, at 3.6 vs 5.7 s. Peak memory 1.1 GB.
+- New default: `resize_max_side 768`, `tracking_candidate_tiles 2` (only while
+  the previous frame locked; any miss searches all 6).
+- Full sequential flight with the new defaults, no aiming (`_v3`): lock 86.9%,
+  0 fixes over 60 m, p50 6.4 m, p90 13.0 m, **3.3 s/frame** median (p90 4.7 s),
+  against 87.6% / 6.6 m / 7.2 s before. Full numbers: `visloc_results_flight03_v3.json`.
