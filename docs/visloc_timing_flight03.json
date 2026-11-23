@@ -1,0 +1,215 @@
+{
+  "frames": 120,
+  "start": 20,
+  "torch_threads": 2,
+  "aim_at_truth": true,
+  "variants": {
+    "baseline": {
+      "overrides": {},
+      "lock_rate": 0.567,
+      "error_p50_m": 10.97,
+      "error_p90_m": 18.54,
+      "false_over_60m": 0,
+      "total_ms_p50": 7312,
+      "total_ms_p90": 11065,
+      "stage_ms_p50": {
+        "rectify": 44,
+        "superpoint": 2342,
+        "lightglue": 4784,
+        "geometry": 11,
+        "tile_load": 0
+      },
+      "tiles_matched_mean": 5.99,
+      "lightglue_ms_per_tile": 1208,
+      "winner_rank_counts": {
+        "0": 41,
+        "1": 24,
+        "2": 2,
+        "3": 1
+      },
+      "peak_rss_mb_so_far": 1133
+    },
+    "keypoints_512": {
+      "overrides": {
+        "superpoint.max_num_keypoints": 512
+      },
+      "lock_rate": 0.408,
+      "error_p50_m": 12.19,
+      "error_p90_m": 19.15,
+      "false_over_60m": 0,
+      "total_ms_p50": 3721,
+      "total_ms_p90": 4578,
+      "stage_ms_p50": {
+        "rectify": 34,
+        "superpoint": 1565,
+        "lightglue": 2091,
+        "geometry": 9,
+        "tile_load": 0
+      },
+      "tiles_matched_mean": 5.99,
+      "lightglue_ms_per_tile": 373,
+      "winner_rank_counts": {
+        "0": 30,
+        "1": 17,
+        "2": 1,
+        "3": 1
+      },
+      "peak_rss_mb_so_far": 1133
+    },
+    "keypoints_256": {
+      "overrides": {
+        "superpoint.max_num_keypoints": 256
+      },
+      "lock_rate": 0.208,
+      "error_p50_m": 12.7,
+      "error_p90_m": 19.91,
+      "false_over_60m": 0,
+      "total_ms_p50": 2910,
+      "total_ms_p90": 3395,
+      "stage_ms_p50": {
+        "rectify": 34,
+        "superpoint": 1493,
+        "lightglue": 1382,
+        "geometry": 5,
+        "tile_load": 0
+      },
+      "tiles_matched_mean": 6,
+      "lightglue_ms_per_tile": 238,
+      "winner_rank_counts": {
+        "0": 12,
+        "1": 12,
+        "3": 1
+      },
+      "peak_rss_mb_so_far": 1133
+    },
+    "tiles_2": {
+      "overrides": {
+        "lightglue.max_candidate_tiles": 2
+      },
+      "lock_rate": 0.55,
+      "error_p50_m": 10.57,
+      "error_p90_m": 18.3,
+      "false_over_60m": 0,
+      "total_ms_p50": 2871,
+      "total_ms_p90": 3365,
+      "stage_ms_p50": {
+        "rectify": 31,
+        "superpoint": 1524,
+        "lightglue": 1344,
+        "geometry": 4,
+        "tile_load": 0
+      },
+      "tiles_matched_mean": 2,
+      "lightglue_ms_per_tile": 691,
+      "winner_rank_counts": {
+        "0": 40,
+        "1": 26
+      },
+      "peak_rss_mb_so_far": 1133
+    },
+    "tiles_1": {
+      "overrides": {
+        "lightglue.max_candidate_tiles": 1
+      },
+      "lock_rate": 0.067,
+      "error_p50_m": 15.72,
+      "error_p90_m": 20.88,
+      "false_over_60m": 0,
+      "total_ms_p50": 1883,
+      "total_ms_p90": 2517,
+      "stage_ms_p50": {
+        "rectify": 30,
+        "superpoint": 1473,
+        "lightglue": 344,
+        "geometry": 0,
+        "tile_load": 0
+      },
+      "tiles_matched_mean": 1,
+      "lightglue_ms_per_tile": 466,
+      "winner_rank_counts": {
+        "0": 8
+      },
+      "peak_rss_mb_so_far": 1133
+    },
+    "resize_480": {
+      "overrides": {
+        "superpoint.resize_max_side": 480
+      },
+      "lock_rate": 0.033,
+      "error_p50_m": 13.25,
+      "error_p90_m": 21.03,
+      "false_over_60m": 0,
+      "total_ms_p50": 3417,
+      "total_ms_p90": 4249,
+      "stage_ms_p50": {
+        "rectify": 31,
+        "superpoint": 891,
+        "lightglue": 2463,
+        "geometry": 7,
+        "tile_load": 0
+      },
+      "tiles_matched_mean": 6,
+      "lightglue_ms_per_tile": 419,
+      "winner_rank_counts": {
+        "0": 2,
+        "1": 1,
+        "2": 1
+      },
+      "peak_rss_mb_so_far": 1133
+    },
+    "resize_800": {
+      "overrides": {
+        "superpoint.resize_max_side": 800
+      },
+      "lock_rate": 0.833,
+      "error_p50_m": 8.98,
+      "error_p90_m": 16.19,
+      "false_over_60m": 0,
+      "total_ms_p50": 5725,
+      "total_ms_p90": 6756,
+      "stage_ms_p50": {
+        "rectify": 33,
+        "superpoint": 2237,
+        "lightglue": 3480,
+        "geometry": 8,
+        "tile_load": 0
+      },
+      "tiles_matched_mean": 5.99,
+      "lightglue_ms_per_tile": 591,
+      "winner_rank_counts": {
+        "0": 62,
+        "1": 33,
+        "2": 1,
+        "3": 3
+      },
+      "peak_rss_mb_so_far": 1133
+    },
+    "resize_1024": {
+      "overrides": {
+        "superpoint.resize_max_side": 1024
+      },
+      "lock_rate": 0.833,
+      "error_p50_m": 8.98,
+      "error_p90_m": 16.19,
+      "false_over_60m": 0,
+      "total_ms_p50": 5764,
+      "total_ms_p90": 6725,
+      "stage_ms_p50": {
+        "rectify": 34,
+        "superpoint": 2248,
+        "lightglue": 3488,
+        "geometry": 9,
+        "tile_load": 0
+      },
+      "tiles_matched_mean": 5.99,
+      "lightglue_ms_per_tile": 592,
+      "winner_rank_counts": {
+        "0": 62,
+        "1": 33,
+        "2": 1,
+        "3": 3
+      },
+      "peak_rss_mb_so_far": 1133
+    }
+  }
+}

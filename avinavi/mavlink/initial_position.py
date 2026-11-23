@@ -71,6 +71,11 @@ MAV_CMD_DO_SET_GLOBAL_ORIGIN = 611
 #: GPS_GLOBAL_ORIGIN message ID, used with MAV_CMD_REQUEST_MESSAGE.
 MAVLINK_MSG_ID_GPS_GLOBAL_ORIGIN = 49
 
+#: How often to have the autopilot re-send the origin, in microseconds, via
+#: MAV_CMD_SET_MESSAGE_INTERVAL.  Slow on purpose: this is a safety net against
+#: a dropped packet, not a data stream.
+ORIGIN_REFRESH_INTERVAL_US = 5_000_000.0
+
 
 class InitialPositionError(RuntimeError):
     """No usable starting position could be obtained."""
@@ -149,6 +154,16 @@ class InitialPositionProvider:
         self.connection.add_handler("GPS_GLOBAL_ORIGIN", self._on_origin)
         if self.request_origin_on_start:
             self.request_origin()
+            # GPS_GLOBAL_ORIGIN is in no ArduPilot stream group: it is sent once
+            # on change, with no retry, so one dropped packet on a lossy link
+            # would otherwise mean we never learn the origin at all.  A 5 s
+            # refresh costs nothing and removes that single point of failure.
+            try:
+                self.connection.request_message_interval(
+                    MAVLINK_MSG_ID_GPS_GLOBAL_ORIGIN, ORIGIN_REFRESH_INTERVAL_US
+                )
+            except MavlinkConnectionError as exc:
+                LOG.warning("could not set the origin refresh interval: %s", exc)
 
     def request_origin(self) -> None:
         """Ask the autopilot to emit its current origin now."""

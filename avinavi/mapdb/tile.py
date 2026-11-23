@@ -54,6 +54,11 @@ class TileMetadata:
     ground_resolution_mpp: Optional[float] = None
     #: Mean terrain altitude over the tile, same datum as the EKF origin.
     terrain_alt_m: float = 0.0
+    #: What built ``features.pt``: backend, detector, descriptor width, and the
+    #: resolution the detector actually saw.  ``None`` for a database written
+    #: before fingerprinting existed, which is reported but not fatal.  See
+    #: :mod:`avinavi.features.fingerprint` for why this is recorded at all.
+    extractor: Optional[Dict[str, Any]] = None
     extra: Dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -103,7 +108,13 @@ class TileMetadata:
             "feature_filename",
             "ground_resolution_mpp",
             "terrain_alt_m",
+            "extractor",
         }
+        extractor = data.get("extractor")
+        if extractor is not None and not isinstance(extractor, dict):
+            raise TileFormatError(
+                "%s: 'extractor' must be an object, got %r" % (directory, extractor)
+            )
         return cls(
             tile_id=str(data.get("tile_id") or os.path.basename(directory.rstrip("/"))),
             directory=directory,
@@ -126,6 +137,7 @@ class TileMetadata:
                 else None
             ),
             terrain_alt_m=float(data.get("terrain_alt_m", 0.0)),
+            extractor=dict(extractor) if extractor is not None else None,
             extra={k: v for k, v in data.items() if k not in known},
         )
 
@@ -148,8 +160,28 @@ class TileMetadata:
         }
         if self.transform:
             out["transform"] = list(self.transform)
+        if self.extractor is not None:
+            out["extractor"] = dict(self.extractor)
         out.update(self.extra)
         return out
+
+    @property
+    def extractor_fingerprint(self):
+        """The stored fingerprint as an object, or ``None`` when absent.
+
+        A malformed fingerprint is treated as absent rather than raising: the
+        point of the record is to catch configuration drift, and a database
+        should not become unloadable because one field of its provenance is
+        unreadable.  The missing-fingerprint path already reports itself.
+        """
+        if not self.extractor:
+            return None
+        from ..features.fingerprint import ExtractorFingerprint  # noqa: PLC0415
+
+        try:
+            return ExtractorFingerprint.from_dict(self.extractor)
+        except (ValueError, TypeError):
+            return None
 
     @classmethod
     def load(cls, directory: str) -> "TileMetadata":

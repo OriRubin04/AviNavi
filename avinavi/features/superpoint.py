@@ -24,6 +24,8 @@ from typing import Optional
 import numpy as np
 
 from ..mapdb.tile import TileFeatures
+from .fingerprint import ExtractorFingerprint
+from .resize import USE_CONFIGURED_RESIZE, resolve_max_side
 
 LOG = logging.getLogger(__name__)
 
@@ -76,6 +78,24 @@ class SuperPointExtractor:
             resize_max_side=config.resize_max_side,
         )
 
+    @property
+    def fingerprint(self) -> ExtractorFingerprint:
+        """What a consumer needs to know to tell whether features are comparable."""
+        return ExtractorFingerprint.from_extractor(self)
+
+    def analysis_max_side_for(self, image_max_side: int, resize_max_side=USE_CONFIGURED_RESIZE) -> int:
+        """Longest side this extractor would actually feed the network.
+
+        The builder records it so a tile stored at full resolution but described
+        at a smaller one is visible on inspection rather than only in a poor
+        match rate.
+        """
+        from .resize import analysis_max_side  # noqa: PLC0415 - avoids a wide import
+
+        return analysis_max_side(
+            image_max_side, resolve_max_side(self.resize_max_side, resize_max_side)
+        )
+
     # -- model lifecycle ----------------------------------------------------
     def _ensure_model(self):
         if self._model is not None:
@@ -114,22 +134,31 @@ class SuperPointExtractor:
 
     # -- extraction ---------------------------------------------------------
     def extract(
-        self, image: np.ndarray, resize_max_side: Optional[int] = None
+        self, image: np.ndarray, resize_max_side=USE_CONFIGURED_RESIZE
     ) -> TileFeatures:
         """Extract features from a grayscale or BGR image.
 
         Returns keypoints in the coordinate system of the *input* image.
+
+        ``resize_max_side`` omitted uses the configured value; ``None`` means do
+        not resize at all.  See :mod:`avinavi.features.resize` for why that
+        distinction needs a sentinel rather than ``None``.
         """
         model = self._ensure_model()
         torch = self._torch
 
         gray = _to_grayscale_float(image)
-        max_side = resize_max_side if resize_max_side is not None else self.resize_max_side
+        max_side = resolve_max_side(self.resize_max_side, resize_max_side)
         scaled, scale = _resize_max_side(gray, max_side)
 
         tensor = torch.from_numpy(scaled).to(self.device)[None, None]
         with torch.inference_mode():
-            output = model.extract(tensor)
+            # resize=None is required: lightglue's SuperPoint.extract otherwise
+            # rescales every input to a 1024 px long side by default. That
+            # silently undid resize_max_side (a 640 px frame was upsampled back
+            # to 1024, ~2.5x the compute) and shrank larger tiles, so the
+            # fingerprint recorded a size the network never saw.
+            output = model.extract(tensor, resize=None)
 
         keypoints = output["keypoints"][0].detach().cpu().numpy().astype(np.float32)
         descriptors = output["descriptors"][0].detach().cpu().numpy().astype(np.float32)
@@ -149,7 +178,7 @@ class SuperPointExtractor:
             image_size=(float(gray.shape[1]), float(gray.shape[0])),
         )
 
-    def extract_image_file(self, path: str, resize_max_side: Optional[int] = None) -> TileFeatures:
+    def extract_image_file(self, path: str, resize_max_side=USE_CONFIGURED_RESIZE) -> TileFeatures:
         try:
             import cv2  # noqa: PLC0415 - optional dependency
         except ImportError as exc:  # pragma: no cover

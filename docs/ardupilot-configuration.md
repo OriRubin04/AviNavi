@@ -17,6 +17,77 @@ names do change between releases — `GPS_TYPE` was renamed to `GPS1_TYPE` in 4.
 for instance. In Mission Planner, *Config → Full Parameter List* and the search
 box will tell you what your board has.
 
+## 0. First: which interface does your board even have?
+
+**Before configuring anything below, search the Full Parameter List for
+`VISO_TYPE`.** If it is not there, your firmware has no visual odometry support
+compiled in, and nothing in sections 1–3 will do anything. This is the normal
+state of affairs on a 1 MB board such as the MATEKSYS F405-WING, where
+`ODOMETRY`, `VISION_POSITION_ESTIMATE` **and** `GPS_INPUT` are all absent from a
+stock ArduPlane build — and every one of them fails silently.
+
+Read `docs/flight-controller-compatibility.md` before wiring anything. It has
+the macros, the verification steps and the three ways forward.
+
+The short version of the decision:
+
+| Your board | Use | Configure |
+| --- | --- | --- |
+| 2 MB+ (F765-Wing, H743, Cube…) stock firmware | `ODOMETRY` | sections 1–3 |
+| 1 MB (F405-WING) + custom build with GPS Drivers → MAV | `GPS_INPUT` | section 3a |
+| 1 MB stock firmware | **nothing works** | change one of the above |
+
+`GPS_INPUT` is AviNavi's default (`output.message: gps_input`) because it is the
+only interface a 1 MB board can be given with a single feature flag.
+
+## 3a. The `GPS_INPUT` path
+
+`GPS_INPUT` (message 232) hands ArduPilot a complete synthetic GNSS solution,
+which `AP_GPS_MAV` presents to the EKF exactly as if a receiver had produced it.
+The whole ordinary GPS → EKF3 path is then used, with `EK3_SRC1_*` left at its
+defaults — which is the attraction: no external-nav plumbing, one parameter.
+
+| Parameter | Value | Meaning |
+| --- | --- | --- |
+| `GPS1_TYPE` | `14` | `MAV` — accept GPS over MAVLink. **Reboot required.** |
+| `EK3_ENABLE` | `1` | Enable EKF3. **Reboot required.** |
+| `AHRS_EKF_TYPE` | `3` | Fly on EKF3. |
+| `GPS_AUTO_SWITCH` | `0` | Stop it switching to a real GPS if one appears. |
+
+Source: `libraries/AP_GPS/AP_GPS_MAV.cpp`, and `GPS_TYPE_MAV = 14` in
+`libraries/AP_GPS/AP_GPS.h`.
+
+Nothing in `VISO_*` applies on this path — those parameters belong to
+`AP_VisualOdom`, which is not involved. The camera lever arm and mount rotation
+live in AviNavi's `camera_extrinsics` either way.
+
+### What the EKF will check, and will not tell you about
+
+`EK3_GPS_CHECK` defaults to `31`, which includes the satellite count and HDOP
+tests. A synthetic fix must report a plausible constellation or the EKF will
+simply never use it, and the only hint is a `GPS numsats %u (needs 6)` line in
+`AP_NavEKF3_VehicleStatus`. AviNavi reports 12 satellites and an HDOP of 0.9 by
+default, and `output.gps_input_satellites` is validated to be at least 6.
+
+Those numbers are fabricated — they have to be, there is no constellation. What
+is *not* fabricated is `horiz_accuracy`, which carries the real
+confidence-derived sigma, and which is the field ArduPilot actually weights the
+fix by. That is where the confidence model has to land to have any effect at
+all.
+
+### Verifying it
+
+In Mission Planner, *Flight Data → Status*: `gpsstatus` should read 3 and
+`satcount` 12, with the position moving as the aircraft does. If `gpsstatus`
+stays 0, the messages are not being accepted — check in this order:
+
+1. **`gps_id` must be 0**, not 1. `AP_GPS_MAV::handle_msg` begins
+   `if (state.instance != packet.gps_id) { return; }`, and `GPS1_TYPE = 14` is
+   instance 0. This is the most common integration bug, and it is silent.
+2. `GPS1_TYPE` really is 14, after a reboot.
+3. The Pi's `mavlink.target_system` matches `SYSID_THISMAV`.
+4. `output.send_to_autopilot` is `true` — it ships as `false` on purpose.
+
 ## 1. Enable EKF3 and the external navigation source
 
 | Parameter | Value | Meaning |
@@ -187,18 +258,31 @@ localizer never reads GPS — the messages go to the CSV log and nowhere else.
 
 ## 6. Failsafe and timeout behaviour
 
-ArduPilot stops aiding when external nav data stops arriving; you will see
-`EKF3 IMU0 stopped aiding` in the HUD. Configure what the vehicle does then:
+**ArduPlane has no failsafe for losing a position source in fixed-wing
+flight.** There is no `FS_GPS_*` parameter, and `FS_EKF_ACTION` is a Copter
+parameter with no ArduPlane equivalent. (An earlier version of this section told
+you to set `FS_EKF_ACTION`; that was wrong — see
+[choosing-the-output-message.md](choosing-the-output-message.md).)
 
-- `FS_EKF_ACTION` — what happens on an EKF failsafe (land, AltHold, etc.).
-- `FS_EKF_THRESH` — the EKF variance threshold that triggers it.
+ArduPlane *does* define `FS_EKF_THRESH`, but read from source
+(`ArduPlane/ekf_check.cpp`, ArduPilot master): the check is disabled outside
+QuadPlane VTOL position modes, and the action is QLAND or QHOVER. In fixed-wing
+flight it changes nothing. It is irrelevant to a pure fixed wing.
 
-Do not raise `FS_EKF_THRESH` to stop the failsafe firing during bring-up. If it
-is firing, the visual solution is not good enough yet.
+What actually happens when position stops arriving: EKF3 coasts on inertial
+dead reckoning (tier 3) with **no mode change**, and the aircraft keeps flying
+its mission on an estimate that drifts without bound. EKF3 does send a GCS
+warning, `EKF3 IMU<n> stopped aiding`, when it loses all aiding
+(`AP_NavEKF3_Control.cpp`) — but it is a message, not an action, and an operator
+beyond visual range may never see it.
 
 AviNavi's side of this is deliberate: when it has nothing valid it **sends
-nothing**, rather than repeating a stale pose to keep the rate up. Silence is a
-signal the EKF knows how to act on; a confidently repeated wrong position is not.
+nothing**, rather than repeating a stale pose to keep the rate up. A confidently
+repeated wrong position is worse than silence. But silence is *not* a signal
+ArduPlane acts on — it simply coasts. A failsafe for "all three navigation tiers
+exhausted" therefore has to be implemented on our side, and **it is not yet
+written**. Until it is, treat any flight beyond visual range as unprotected
+against loss of visual position.
 
 ## 7. Verifying that ArduPilot is receiving the messages
 
@@ -253,6 +337,21 @@ that, and there is nothing to gain from going higher when the underlying visual
 localization runs at 2–5 Hz.
 
 ## 9. Parameter summary
+
+### For the `GPS_INPUT` path (a 1 MB board, custom build)
+
+```
+GPS1_TYPE       14    # MAV. Reboot required.
+GPS_AUTO_SWITCH 0     # do not switch away to a real GPS
+EK3_ENABLE      1     # Reboot required.
+AHRS_EKF_TYPE   3
+EK3_GPS_CHECK   31    # default; AviNavi reports 12 sats to satisfy it
+```
+
+Nothing in `VISO_*` applies here. With `output.message: gps_input` and
+`output.gps_input_id: 0`, that is the whole configuration.
+
+### For the external-navigation path (2 MB board)
 
 A starting point for a multirotor with a healthy barometer and compass:
 

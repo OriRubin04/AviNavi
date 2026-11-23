@@ -16,9 +16,13 @@ Frames used in AviNavi (see ``docs/coordinate-frames.md`` for diagrams):
     variant ArduPilot expects in ``ODOMETRY`` ``MAV_FRAME_LOCAL_FRD``.
 
 The extrinsic ``R_body_from_camera`` is a *fixed* rotation configured in
-``camera_extrinsics``.  Identity corresponds to a nadir-pointing camera whose
-image +X axis lies along body +Y (right) and image +Y along body -X (aft),
-because the camera's +Z (optical axis) must then coincide with body +Z (down).
+``camera_extrinsics``.  Identity means the camera axes coincide with the body
+axes: optical axis (+Z) straight down, image +X along the nose, image +Y along
+the right wing.  Note what that implies for the picture: image +Y is *down the
+image*, so with identity extrinsics the nose appears at the **right edge** of
+the frame.  The more usual physical mount - camera rotated so the nose is at the
+**top** of the frame - is ``yaw_deg: 90``.  See ``docs/coordinate-frames.md``
+for the full table.
 
 Quaternions are stored ``(w, x, y, z)`` - MAVLink's ordering - and always
 represent a rotation *from* the frame named second *to* the frame named first,
@@ -207,10 +211,26 @@ class CameraExtrinsics:
 
         v_body = R_body_from_camera @ v_camera
 
-    With the identity rotation the camera optical axis (+Z) coincides with body
-    +Z (down), which is the nadir mount this system is designed around.  A
-    camera rotated 90 degrees clockwise in its mount is expressed as
-    ``yaw_deg: 90`` and nothing else in the pipeline changes.
+    The identity rotation therefore makes the camera axes coincide with the body
+    axes: optical axis down (a nadir mount), image +X along the nose, image +Y
+    along the right wing.  Because image +Y points *down the image*, identity
+    puts the nose at the right edge of the picture.
+
+    The common mountings, for a downward-facing camera:
+
+    ======================  ==========  =========================
+    Nose appears at         ``yaw_deg``  image +X points along
+    ======================  ==========  =========================
+    right edge              0            body +X (forward)
+    top edge                90           body +Y (right)
+    left edge               180          body -X (aft)
+    bottom edge             270 / -90    body -Y (left)
+    ======================  ==========  =========================
+
+    Get this wrong and the recovered yaw is off by a multiple of 90 degrees,
+    which the EKF will fight rather than reject.  The cheapest check is the
+    bench test in ``docs/safety-and-testing.md``: carry the aircraft a measured
+    distance and confirm the reported position moves that way.
     """
 
     def __init__(
